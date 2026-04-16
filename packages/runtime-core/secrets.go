@@ -25,33 +25,56 @@ const (
 	secretFailureNotFound           = "secret_not_found"
 	secretFailureReadCanceled       = "secret_read_canceled"
 	secretFailureGenericReadFail    = "secret_read_failed"
+	webhookTokenSecretConfigRef     = "secrets.webhook_token_ref"
+	webhookTokenSecretDefaultDevRef = "BOT_PLATFORM_WEBHOOK_TOKEN"
+	webhookTokenSecretConsumer      = "adapter-webhook.NewWithSecretRef"
 )
 
+type WebhookSecretContract struct {
+	ConfigRef     string `json:"configRef"`
+	DefaultDevRef string `json:"defaultDevRef"`
+	Consumer      string `json:"consumer"`
+	PathNote      string `json:"pathNote"`
+}
+
 type SecretPolicyDeclaration struct {
-	Provider              string   `json:"provider"`
-	RefPrefix             string   `json:"refPrefix"`
-	RefFormat             string   `json:"refFormat"`
-	RuntimeOwned          bool     `json:"runtimeOwned"`
-	ConfigRefs            []string `json:"configRefs,omitempty"`
-	ActiveConsumers       []string `json:"activeConsumers,omitempty"`
-	IntegrationPoints     []string `json:"integrationPoints,omitempty"`
-	AuditAction           string   `json:"auditAction,omitempty"`
-	AuditOutcomes         []string `json:"auditOutcomes,omitempty"`
-	UnsupportedModes      []string `json:"unsupportedModes,omitempty"`
-	VerificationEndpoints []string `json:"verificationEndpoints,omitempty"`
-	Facts                 []string `json:"facts,omitempty"`
-	Summary               string   `json:"summary,omitempty"`
+	Provider              string                `json:"provider"`
+	RefPrefix             string                `json:"refPrefix"`
+	RefFormat             string                `json:"refFormat"`
+	RuntimeOwned          bool                  `json:"runtimeOwned"`
+	MainPathContract      WebhookSecretContract `json:"mainPathContract"`
+	ConfigRefs            []string              `json:"configRefs,omitempty"`
+	ActiveConsumers       []string              `json:"activeConsumers,omitempty"`
+	IntegrationPoints     []string              `json:"integrationPoints,omitempty"`
+	AuditAction           string                `json:"auditAction,omitempty"`
+	AuditOutcomes         []string              `json:"auditOutcomes,omitempty"`
+	UnsupportedModes      []string              `json:"unsupportedModes,omitempty"`
+	VerificationEndpoints []string              `json:"verificationEndpoints,omitempty"`
+	Facts                 []string              `json:"facts,omitempty"`
+	Summary               string                `json:"summary,omitempty"`
+}
+
+func WebhookSecretMainPathContract() WebhookSecretContract {
+	pathNote := webhookTokenSecretConfigRef + " -> " + webhookTokenSecretConsumer + " -> SecretRegistry.Resolve"
+	return WebhookSecretContract{
+		ConfigRef:     webhookTokenSecretConfigRef,
+		DefaultDevRef: webhookTokenSecretDefaultDevRef,
+		Consumer:      webhookTokenSecretConsumer,
+		PathNote:      pathNote,
+	}
 }
 
 func SecretPolicy() SecretPolicyDeclaration {
+	contract := WebhookSecretMainPathContract()
 	declaration := SecretPolicyDeclaration{
 		Provider:              secretProviderEnv,
 		RefPrefix:             secretRefPrefix,
 		RefFormat:             "BOT_PLATFORM_[A-Z0-9_]+",
 		RuntimeOwned:          true,
-		ConfigRefs:            []string{"secrets.webhook_token_ref"},
+		MainPathContract:      contract,
+		ConfigRefs:            []string{contract.ConfigRef},
 		ActiveConsumers:       []string{"adapter-webhook"},
-		IntegrationPoints:     []string{"secrets.webhook_token_ref", "adapter-webhook.NewWithSecretRef"},
+		IntegrationPoints:     []string{contract.ConfigRef, contract.Consumer},
 		AuditAction:           "secret.read",
 		AuditOutcomes:         []string{"success", secretFailureInvalidRef, secretFailureNotFound, secretFailureReadCanceled, secretFailureGenericReadFail},
 		UnsupportedModes:      []string{"multi-provider", "secret-write-api", "rotation", "versioning", "scope-based-secret-authorization", "console-secret-management", "plugin-secret-injection"},
@@ -59,11 +82,11 @@ func SecretPolicy() SecretPolicyDeclaration {
 		Facts: []string{
 			"secret refs must be runtime-owned BOT_PLATFORM_* names and may contain only A-Z, 0-9, and _",
 			"the only provider wired today is environment-variable lookup via EnvSecretProvider",
-			"the only real config-to-read path wired today is secrets.webhook_token_ref -> adapter-webhook.NewWithSecretRef -> SecretRegistry.Resolve",
+			"the only real config-to-read path wired today is " + contract.PathNote,
 			"every registry resolve records secret.read audit with success or failure reason while webhook clients still receive only generic secret resolution failures",
 		},
 	}
-	declaration.Summary = "provider=env; runtime-owned BOT_PLATFORM_* refs only; current active read path is secrets.webhook_token_ref -> adapter-webhook.NewWithSecretRef; every resolve records secret.read audit; no multi-provider or secret write API"
+	declaration.Summary = "provider=env; runtime-owned BOT_PLATFORM_* refs only; current active read path is " + contract.ConfigRef + " -> " + contract.Consumer + "; every resolve records secret.read audit; no multi-provider or secret write API"
 	return declaration
 }
 

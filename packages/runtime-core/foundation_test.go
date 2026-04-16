@@ -53,12 +53,41 @@ func TestLoadConfigReadsYAMLAndAppliesEnvOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
+	contract := WebhookSecretMainPathContract()
 
 	if cfg.Runtime.Environment != "production" || cfg.Runtime.LogLevel != "warn" || cfg.Runtime.HTTPPort != 9090 {
 		t.Fatalf("expected env override to win, got %+v", cfg.Runtime)
 	}
-	if cfg.Secrets.WebhookTokenRef != "BOT_PLATFORM_WEBHOOK_TOKEN" {
+	if cfg.Secrets.WebhookTokenRef != contract.DefaultDevRef {
 		t.Fatalf("expected secret ref to load from yaml, got %+v", cfg.Secrets)
+	}
+}
+
+func TestDevelopmentConfigWebhookSecretMainPathContractStaysAligned(t *testing.T) {
+	t.Parallel()
+
+	contract := WebhookSecretMainPathContract()
+	configPath := filepath.Join("..", "..", "deploy", "config.dev.yaml")
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	policy := SecretPolicy()
+
+	if cfg.Secrets.WebhookTokenRef != contract.DefaultDevRef {
+		t.Fatalf("expected dev config secret ref %q, got %q", contract.DefaultDevRef, cfg.Secrets.WebhookTokenRef)
+	}
+	if policy.MainPathContract != contract {
+		t.Fatalf("expected secret policy main path contract %+v, got %+v", contract, policy.MainPathContract)
+	}
+	if len(policy.ConfigRefs) != 1 || policy.ConfigRefs[0] != contract.ConfigRef {
+		t.Fatalf("expected secret policy config ref %q, got %+v", contract.ConfigRef, policy.ConfigRefs)
+	}
+	if len(policy.IntegrationPoints) != 2 || policy.IntegrationPoints[0] != contract.ConfigRef || policy.IntegrationPoints[1] != contract.Consumer {
+		t.Fatalf("expected secret policy integration points [%q %q], got %+v", contract.ConfigRef, contract.Consumer, policy.IntegrationPoints)
+	}
+	if !strings.Contains(strings.Join(policy.Facts, " "), contract.PathNote) {
+		t.Fatalf("expected secret policy facts to include path note %q, got %+v", contract.PathNote, policy.Facts)
 	}
 }
 
@@ -85,7 +114,8 @@ func TestLoadConfigRejectsInvalidWebhookSecretRef(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	_, err := LoadConfig(path)
-	if err == nil || err.Error() != "invalid secrets.webhook_token_ref: secret ref must use BOT_PLATFORM_ prefix" {
+	expectedErr := "invalid " + WebhookSecretMainPathContract().ConfigRef + ": secret ref must use BOT_PLATFORM_ prefix"
+	if err == nil || err.Error() != expectedErr {
 		t.Fatalf("expected invalid secret ref config error, got %v", err)
 	}
 }

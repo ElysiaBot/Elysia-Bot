@@ -84,7 +84,7 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.Secrets.WebhookTokenRef != "" {
 		if err := ValidateSecretRef(cfg.Secrets.WebhookTokenRef); err != nil {
-			return Config{}, fmt.Errorf("invalid secrets.webhook_token_ref: %w", err)
+			return Config{}, fmt.Errorf("invalid %s: %w", WebhookSecretMainPathContract().ConfigRef, err)
 		}
 	}
 	if err := cfg.RBAC.Validate(); err != nil {
