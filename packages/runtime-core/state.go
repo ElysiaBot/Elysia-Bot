@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS plugin_enabled_overlays (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS plugin_configs (
+  plugin_id TEXT PRIMARY KEY,
+  config_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS plugin_status_snapshots (
   plugin_id TEXT PRIMARY KEY,
   last_dispatch_kind TEXT NOT NULL,
@@ -130,6 +136,12 @@ type PluginStatusSnapshot struct {
 type PluginEnabledState struct {
 	PluginID  string
 	Enabled   bool
+	UpdatedAt time.Time
+}
+
+type PluginConfigState struct {
+	PluginID  string
+	RawConfig json.RawMessage
 	UpdatedAt time.Time
 }
 
@@ -299,6 +311,53 @@ ORDER BY plugin_id ASC
 	}
 	defer rows.Close()
 	return scanPluginEnabledStates(rows)
+}
+
+func (s *SQLiteStateStore) SavePluginConfig(ctx context.Context, pluginID string, rawConfig json.RawMessage) error {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return fmt.Errorf("save plugin config: plugin id is required")
+	}
+	if len(rawConfig) == 0 {
+		return fmt.Errorf("save plugin config: raw config is required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO plugin_configs (plugin_id, config_json, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(plugin_id) DO UPDATE SET
+  config_json=excluded.config_json,
+  updated_at=excluded.updated_at
+`, pluginID, string(rawConfig), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("upsert plugin config: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStateStore) LoadPluginConfig(ctx context.Context, pluginID string) (PluginConfigState, error) {
+	var (
+		state        PluginConfigState
+		rawConfig    string
+		updatedAtRaw string
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT plugin_id, config_json, updated_at
+FROM plugin_configs
+WHERE plugin_id = ?
+`, pluginID).Scan(&state.PluginID, &rawConfig, &updatedAtRaw)
+	if err == sql.ErrNoRows {
+		return PluginConfigState{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("load plugin config: %w", err)
+	}
+	updatedAt, err := parseSQLiteTimestamp(updatedAtRaw)
+	if err != nil {
+		return PluginConfigState{}, fmt.Errorf("parse plugin config updated_at: %w", err)
+	}
+	state.RawConfig = append(json.RawMessage(nil), rawConfig...)
+	state.UpdatedAt = updatedAt
+	return state, nil
 }
 
 func (s *SQLiteStateStore) RecordDispatchResult(result DispatchResult) error {
@@ -604,6 +663,7 @@ func (s *SQLiteStateStore) Counts(ctx context.Context) (map[string]int, error) {
 		"event_journal":           `SELECT COUNT(*) FROM event_journal`,
 		"plugin_registry":         `SELECT COUNT(*) FROM plugin_registry`,
 		"plugin_enabled_overlays": `SELECT COUNT(*) FROM plugin_enabled_overlays`,
+		"plugin_configs":          `SELECT COUNT(*) FROM plugin_configs`,
 		"plugin_status_snapshots": `SELECT COUNT(*) FROM plugin_status_snapshots`,
 		"sessions":                `SELECT COUNT(*) FROM sessions`,
 		"idempotency_keys":        `SELECT COUNT(*) FROM idempotency_keys`,

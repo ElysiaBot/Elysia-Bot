@@ -266,6 +266,80 @@ func TestRuntimeAppOperatorDisablePersistsOverlaySkipsDispatchAndReEnables(t *te
 	}
 }
 
+func TestRuntimeAppPluginEchoConfigOperatorRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+
+	app.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `plugin-echo config property "prefix" must be a string`) {
+		t.Fatalf("expected caller-facing prefix validation error, got %s", resp.Body.String())
+	}
+	if _, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo"); err == nil {
+		t.Fatal("expected invalid config not to be persisted")
+	}
+}
+
+func TestRuntimeAppReloadsPersistedPluginEchoConfigAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := writeTestConfigAt(t, dir)
+
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+
+	configReq := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":"persisted: "}`))
+	configReq.Header.Set("Content-Type", "application/json")
+	configResp := httptest.NewRecorder()
+	app.ServeHTTP(configResp, configReq)
+	if configResp.Code != http.StatusOK {
+		t.Fatalf("expected config operator 200, got %d: %s", configResp.Code, configResp.Body.String())
+	}
+	stored, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo")
+	if err != nil {
+		t.Fatalf("load persisted plugin config: %v", err)
+	}
+	if string(stored.RawConfig) != `{"prefix":"persisted: "}` {
+		t.Fatalf("expected persisted raw config, got %s", string(stored.RawConfig))
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	restarted, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("restart runtime app: %v", err)
+	}
+	defer func() { _ = restarted.Close() }()
+
+	messageReq := httptest.NewRequest(http.MethodPost, "/demo/onebot/message", strings.NewReader(`{"post_type":"message","message_type":"group","time":1712034000,"user_id":10001,"group_id":42,"message_id":9901,"raw_message":"hello restart","sender":{"nickname":"alice"}}`))
+	messageReq.Header.Set("Content-Type", "application/json")
+	messageResp := httptest.NewRecorder()
+	restarted.ServeHTTP(messageResp, messageReq)
+
+	if messageResp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", messageResp.Code, messageResp.Body.String())
+	}
+	if !strings.Contains(messageResp.Body.String(), "persisted: hello restart") {
+		t.Fatalf("expected restarted runtime to use persisted echo prefix, got %s", messageResp.Body.String())
+	}
+}
+
 func TestRuntimeAppConsoleReturnsForbiddenWhenConsoleReadAuthorizationDenies(t *testing.T) {
 	t.Parallel()
 

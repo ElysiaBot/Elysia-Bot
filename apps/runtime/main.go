@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -238,8 +239,14 @@ func newRuntimeApp(configPath string) (*runtimeApp, error) {
 		runtime.SetCommandAuthorizer(runtimecore.NewAdminCommandAuthorizer(config.RBAC))
 	}
 
-	echoPlugin := pluginecho.New(replies, pluginecho.Config{Prefix: "echo: "})
+	echoConfig, echoRawConfig, err := loadPersistedEchoConfig(state)
+	if err != nil {
+		_ = state.Close()
+		return nil, fmt.Errorf("load echo plugin config: %w", err)
+	}
+	echoPlugin := pluginecho.New(replies, echoConfig)
 	echoDefinition := echoPlugin.Definition()
+	echoDefinition.InstanceConfig = echoRawConfig
 	echoDefinition.Handlers.Event = sourceScopedEventHandler{allowed: allowedSources("onebot", "runtime-demo-scheduler"), inner: echoPlugin}
 	if err := runtime.RegisterPlugin(echoDefinition); err != nil {
 		_ = state.Close()
@@ -719,6 +726,10 @@ func (a *runtimeApp) handlePluginOperator(w http.ResponseWriter, r *http.Request
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if strings.HasSuffix(strings.TrimSpace(r.URL.Path), "/config") {
+		a.handlePluginConfigOperator(w, r)
+		return
+	}
 	pluginID, action, ok := parsePluginOperatorPath(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -762,6 +773,46 @@ func (a *runtimeApp) handlePluginOperator(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.Request) {
+	pluginID, ok := parsePluginConfigPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if pluginID != "plugin-echo" {
+		http.Error(w, "plugin config operator only supports plugin-echo", http.StatusNotFound)
+		return
+	}
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("read plugin config: %v", err), http.StatusBadRequest)
+		return
+	}
+	rawConfigJSON, _, typedConfig, err := validateAndDecodeEchoConfig(rawBody)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := a.state.SavePluginConfig(r.Context(), pluginID, rawConfigJSON); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	stored, err := a.state.LoadPluginConfig(r.Context(), pluginID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":      "ok",
+		"plugin_id":   pluginID,
+		"config":      map[string]any{"prefix": typedConfig.Prefix},
+		"updated_at":  stored.UpdatedAt.UTC().Format(time.RFC3339),
+		"persisted":   true,
+		"config_path": "/demo/plugins/plugin-echo/config",
+	})
+}
+
 func parsePluginOperatorPath(path string) (pluginID string, action string, ok bool) {
 	trimmed := strings.Trim(strings.TrimSpace(path), "/")
 	parts := strings.Split(trimmed, "/")
@@ -777,6 +828,62 @@ func parsePluginOperatorPath(path string) (pluginID string, action string, ok bo
 		return "", "", false
 	}
 	return pluginID, action, true
+}
+
+func parsePluginConfigPath(path string) (pluginID string, ok bool) {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 4 || parts[0] != "demo" || parts[1] != "plugins" || parts[3] != "config" {
+		return "", false
+	}
+	pluginID = strings.TrimSpace(parts[2])
+	if pluginID == "" {
+		return "", false
+	}
+	return pluginID, true
+}
+
+func loadPersistedEchoConfig(state *runtimecore.SQLiteStateStore) (pluginecho.Config, map[string]any, error) {
+	defaultConfig := pluginecho.Config{Prefix: "echo: "}
+	if state == nil {
+		return defaultConfig, nil, nil
+	}
+	stored, err := state.LoadPluginConfig(context.Background(), "plugin-echo")
+	if err == sql.ErrNoRows {
+		return defaultConfig, nil, nil
+	}
+	if err != nil {
+		return pluginecho.Config{}, nil, err
+	}
+	_, rawConfig, typedConfig, err := validateAndDecodeEchoConfig(stored.RawConfig)
+	if err != nil {
+		return pluginecho.Config{}, nil, err
+	}
+	return typedConfig, rawConfig, nil
+}
+
+func validateAndDecodeEchoConfig(raw []byte) (json.RawMessage, map[string]any, pluginecho.Config, error) {
+	var rawConfig map[string]any
+	if err := json.Unmarshal(raw, &rawConfig); err != nil {
+		return nil, nil, pluginecho.Config{}, fmt.Errorf("plugin-echo config must be a JSON object: %w", err)
+	}
+	if rawConfig == nil {
+		return nil, nil, pluginecho.Config{}, errors.New("plugin-echo config must be a JSON object")
+	}
+	if prefix, exists := rawConfig["prefix"]; exists {
+		if _, ok := prefix.(string); !ok {
+			return nil, nil, pluginecho.Config{}, errors.New(`plugin-echo config property "prefix" must be a string`)
+		}
+	}
+	encoded, err := json.Marshal(rawConfig)
+	if err != nil {
+		return nil, nil, pluginecho.Config{}, fmt.Errorf("marshal plugin-echo config: %w", err)
+	}
+	var typedConfig pluginecho.Config
+	if err := json.Unmarshal(encoded, &typedConfig); err != nil {
+		return nil, nil, pluginecho.Config{}, fmt.Errorf("decode plugin-echo config: %w", err)
+	}
+	return encoded, rawConfig, typedConfig, nil
 }
 
 func actorRoles(cfg *runtimecore.RBACConfig) map[string][]string {

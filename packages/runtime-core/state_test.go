@@ -80,7 +80,7 @@ func TestSQLiteStateStorePersistsCoreMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts: %v", err)
 	}
-	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
 		t.Fatalf("unexpected counts: %+v", counts)
 	}
 }
@@ -140,8 +140,51 @@ func TestSQLiteStateStoreRetainsMetadataAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts after reopen: %v", err)
 	}
-	if counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+	if counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
 		t.Fatalf("expected persisted metadata after reopen, got %+v", counts)
+	}
+}
+
+func TestSQLiteStateStorePersistsPluginConfigAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	ctx := context.Background()
+	rawConfig := []byte(`{"prefix":"persisted: "}`)
+
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SavePluginConfig(ctx, "plugin-echo", rawConfig); err != nil {
+		t.Fatalf("save plugin config: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	state, err := reopened.LoadPluginConfig(ctx, "plugin-echo")
+	if err != nil {
+		t.Fatalf("load plugin config: %v", err)
+	}
+	if state.PluginID != "plugin-echo" {
+		t.Fatalf("expected plugin-echo config state, got %+v", state)
+	}
+	if string(state.RawConfig) != string(rawConfig) {
+		t.Fatalf("expected raw config %s, got %s", string(rawConfig), string(state.RawConfig))
+	}
+	counts, err := reopened.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts after reopen: %v", err)
+	}
+	if counts["plugin_configs"] != 1 {
+		t.Fatalf("expected one persisted plugin config row, got %+v", counts)
 	}
 }
 
