@@ -29,6 +29,39 @@ func writeTestConfigAt(t *testing.T, dir string) string {
 	return path
 }
 
+type runtimeConsoleResponse struct {
+	Schedules []struct {
+		ID string `json:"id"`
+	} `json:"schedules"`
+	Status struct {
+		Schedules int `json:"schedules"`
+	} `json:"status"`
+}
+
+func readRuntimeConsoleResponse(t *testing.T, app *runtimeApp) runtimeConsoleResponse {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected console 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload runtimeConsoleResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode console payload: %v", err)
+	}
+	return payload
+}
+
+func hasConsoleSchedule(payload runtimeConsoleResponse, scheduleID string) bool {
+	for _, schedule := range payload.Schedules {
+		if schedule.ID == scheduleID {
+			return true
+		}
+	}
+	return false
+}
+
 func writeConsoleRBACConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -131,7 +164,7 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), `"plugin_read_model": "runtime-registry+sqlite-plugin-status-snapshot"`) {
 		t.Fatalf("expected console payload to include plugin_read_model=runtime-registry+sqlite-plugin-status-snapshot, got %s", resp.Body.String())
 	}
-	for _, expected := range []string{`"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"console_mode": "read+operator-plugin-enable-disable"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`} {
+	for _, expected := range []string{`"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"/demo/schedules/{schedule-id}/cancel"`, `"console_mode": "read+operator-plugin-enable-disable"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`} {
 		if !strings.Contains(resp.Body.String(), expected) {
 			t.Fatalf("expected console payload to include %s, got %s", expected, resp.Body.String())
 		}
@@ -550,6 +583,131 @@ func TestRuntimeAppPersistsDelaySchedulePlan(t *testing.T) {
 		if !strings.Contains(consoleResp.Body.String(), expected) {
 			t.Fatalf("expected console payload to include %q, got %s", expected, consoleResp.Body.String())
 		}
+	}
+}
+
+func TestRuntimeAppCancelScheduleOperatorRemovesPersistedPlanFromConsoleAndRecordsEvidence(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-cancel-1","delay_ms":500,"message":"cancel me"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp := httptest.NewRecorder()
+	app.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("expected create schedule 200, got %d: %s", createResp.Code, createResp.Body.String())
+	}
+
+	before := readRuntimeConsoleResponse(t, app)
+	if before.Status.Schedules != 1 || !hasConsoleSchedule(before, "schedule-cancel-1") {
+		t.Fatalf("expected console to show one schedule before cancel, got %+v", before)
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-cancel-1/cancel", nil)
+	cancelResp := httptest.NewRecorder()
+	app.ServeHTTP(cancelResp, cancelReq)
+	if cancelResp.Code != http.StatusOK {
+		t.Fatalf("expected cancel operator 200, got %d: %s", cancelResp.Code, cancelResp.Body.String())
+	}
+	for _, expected := range []string{`"status":"ok"`, `"schedule_id":"schedule-cancel-1"`, `"action":"cancel"`} {
+		if !strings.Contains(cancelResp.Body.String(), expected) && !strings.Contains(cancelResp.Body.String(), strings.ReplaceAll(expected, `:`, `: `)) {
+			t.Fatalf("expected cancel response to include %s, got %s", expected, cancelResp.Body.String())
+		}
+	}
+
+	if _, err := app.state.LoadSchedulePlan(t.Context(), "schedule-cancel-1"); err == nil {
+		t.Fatal("expected cancelled schedule to be deleted from persistence")
+	}
+	counts, err := app.state.Counts(t.Context())
+	if err != nil {
+		t.Fatalf("sqlite counts: %v", err)
+	}
+	if counts["schedule_plans"] != 0 {
+		t.Fatalf("expected no persisted schedules after cancel, got %+v", counts)
+	}
+
+	after := readRuntimeConsoleResponse(t, app)
+	if after.Status.Schedules != 0 || hasConsoleSchedule(after, "schedule-cancel-1") {
+		t.Fatalf("expected cancelled schedule to disappear from console read side, got %+v", after)
+	}
+
+	entries := app.audits.AuditEntries()
+	if len(entries) == 0 {
+		t.Fatal("expected cancel operator to record audit evidence")
+	}
+	lastEntry := entries[len(entries)-1]
+	if lastEntry.Action != "cancel" || lastEntry.Target != "schedule-cancel-1" || !lastEntry.Allowed || lastEntry.Actor != "admin-user" || lastEntry.Permission != "schedule:cancel" || lastEntry.Reason != "schedule_cancelled" {
+		t.Fatalf("expected cancel audit entry, got %+v", lastEntry)
+	}
+	logs := app.logs.Lines()
+	matchedLog := false
+	for _, line := range logs {
+		if strings.Contains(line, "runtime schedule cancelled") && strings.Contains(line, "schedule-cancel-1") && strings.Contains(line, "admin-user") {
+			matchedLog = true
+			break
+		}
+	}
+	if !matchedLog {
+		t.Fatalf("expected cancel operator log evidence, got %+v", logs)
+	}
+
+	notFoundReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-cancel-1/cancel", nil)
+	notFoundResp := httptest.NewRecorder()
+	app.ServeHTTP(notFoundResp, notFoundReq)
+	if notFoundResp.Code != http.StatusNotFound {
+		t.Fatalf("expected second cancel to return 404, got %d: %s", notFoundResp.Code, notFoundResp.Body.String())
+	}
+	if !strings.Contains(notFoundResp.Body.String(), "schedule not found") {
+		t.Fatalf("expected 404 response to mention schedule not found, got %s", notFoundResp.Body.String())
+	}
+}
+
+func TestRuntimeAppCancelScheduleOperatorDeletionSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := writeTestConfigAt(t, dir)
+
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-cancel-restart","delay_ms":500,"message":"cancel before restart"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp := httptest.NewRecorder()
+	app.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("expected create schedule 200, got %d: %s", createResp.Code, createResp.Body.String())
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-cancel-restart/cancel", nil)
+	cancelResp := httptest.NewRecorder()
+	app.ServeHTTP(cancelResp, cancelReq)
+	if cancelResp.Code != http.StatusOK {
+		t.Fatalf("expected cancel operator 200, got %d: %s", cancelResp.Code, cancelResp.Body.String())
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	restarted, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("restart runtime app: %v", err)
+	}
+	defer func() { _ = restarted.Close() }()
+
+	if _, err := restarted.state.LoadSchedulePlan(t.Context(), "schedule-cancel-restart"); err == nil {
+		t.Fatal("expected cancelled schedule to stay deleted after restart")
+	}
+	console := readRuntimeConsoleResponse(t, restarted)
+	if console.Status.Schedules != 0 || hasConsoleSchedule(console, "schedule-cancel-restart") {
+		t.Fatalf("expected restarted console to stay clear of deleted schedule, got %+v", console)
 	}
 }
 

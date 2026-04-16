@@ -18,6 +18,7 @@ import (
 
 	adapteronebot "github.com/ohmyopencode/bot-platform/adapters/adapter-onebot"
 	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 	runtimecore "github.com/ohmyopencode/bot-platform/packages/runtime-core"
 	pluginadmin "github.com/ohmyopencode/bot-platform/plugins/plugin-admin"
 	pluginaichat "github.com/ohmyopencode/bot-platform/plugins/plugin-ai-chat"
@@ -314,6 +315,7 @@ func newRuntimeApp(configPath string) (*runtimeApp, error) {
 				"/demo/jobs/enqueue",
 				"/demo/jobs/timeout",
 				"/demo/schedules/echo-delay",
+				"/demo/schedules/{schedule-id}/cancel",
 				"/demo/plugins/{plugin-id}/disable",
 				"/demo/plugins/{plugin-id}/enable",
 				"/demo/replies",
@@ -359,6 +361,7 @@ func (a *runtimeApp) routes() {
 	a.mux.HandleFunc("/demo/jobs/enqueue", a.handleJobEnqueue)
 	a.mux.HandleFunc("/demo/jobs/timeout", a.handleJobTimeout)
 	a.mux.HandleFunc("/demo/schedules/echo-delay", a.handleScheduleEchoDelay)
+	a.mux.HandleFunc("/demo/schedules/", a.handleScheduleOperator)
 	a.mux.HandleFunc("/demo/plugins/", a.handlePluginOperator)
 	a.mux.HandleFunc("/demo/replies", a.handleReplies)
 	a.mux.HandleFunc("/demo/state/counts", a.handleStateCounts)
@@ -456,6 +459,8 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["schedule_read_model"] = "sqlite"
 	meta["schedule_status_source"] = "sqlite-schedule-plans"
 	meta["schedule_status_persisted"] = true
+	meta["schedule_operator_actions"] = []string{"/demo/schedules/{schedule-id}/cancel"}
+	meta["schedule_operator_scope"] = "currently-registered schedules only"
 	meta["schedule_recovery_source"] = "runtime-startup-restore"
 	meta["schedule_recovery_reason"] = "missing dueAt is recomputed and persisted during startup restore; invalid persisted plans are skipped"
 	meta["schedule_recovery_total_schedules"] = scheduleRecovery.TotalSchedules
@@ -706,6 +711,68 @@ func (a *runtimeApp) handleScheduleEchoDelay(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(plan)
 }
 
+func (a *runtimeApp) handleScheduleOperator(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	scheduleID, action, ok := parseScheduleOperatorPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
+	if actor == "" {
+		actor = "admin-user"
+	}
+	if err := a.scheduler.Cancel(scheduleID); err != nil {
+		status := http.StatusInternalServerError
+		logMessage := "runtime schedule cancel failed"
+		logLevel := "error"
+		logFields := map[string]any{
+			"actor":       actor,
+			"action":      action,
+			"schedule_id": scheduleID,
+			"reason":      "schedule_cancel_failed",
+		}
+		if strings.Contains(err.Error(), "schedule not found") {
+			status = http.StatusNotFound
+			logMessage = "runtime schedule cancel not found"
+			logLevel = "warn"
+			logFields["reason"] = "schedule_not_found"
+		}
+		if a.logger != nil {
+			_ = a.logger.Log(logLevel, logMessage, runtimecore.LogContext{}, logFields)
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	if a.audits != nil {
+		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
+			Actor:      actor,
+			Permission: "schedule:cancel",
+			Action:     action,
+			Target:     scheduleID,
+			Allowed:    true,
+			Reason:     "schedule_cancelled",
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
+	if a.logger != nil {
+		_ = a.logger.Log("info", "runtime schedule cancelled", runtimecore.LogContext{}, map[string]any{
+			"actor":       actor,
+			"action":      action,
+			"schedule_id": scheduleID,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":      "ok",
+		"schedule_id": scheduleID,
+		"action":      action,
+	})
+}
+
 func (a *runtimeApp) handleReplies(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(a.replies.Since(0))
@@ -828,6 +895,23 @@ func parsePluginOperatorPath(path string) (pluginID string, action string, ok bo
 		return "", "", false
 	}
 	return pluginID, action, true
+}
+
+func parseScheduleOperatorPath(path string) (scheduleID string, action string, ok bool) {
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 4 || parts[0] != "demo" || parts[1] != "schedules" {
+		return "", "", false
+	}
+	scheduleID = strings.TrimSpace(parts[2])
+	action = strings.TrimSpace(parts[3])
+	if scheduleID == "" {
+		return "", "", false
+	}
+	if action != "cancel" {
+		return "", "", false
+	}
+	return scheduleID, action, true
 }
 
 func parsePluginConfigPath(path string) (pluginID string, ok bool) {
