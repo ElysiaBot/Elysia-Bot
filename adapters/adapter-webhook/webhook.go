@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -97,7 +98,7 @@ func (a *Adapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload WebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if payload, err = decodeWebhookPayload(r.Body); err != nil {
 		traceID := newWebhookID("trace")
 		a.recordAudit("webhook.reject.invalid_payload", r.URL.Path, requestActor(r))
 		a.recordRejectObservability(
@@ -147,6 +148,25 @@ func (a *Adapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "event_id": event.EventID, "trace_id": event.TraceID})
+}
+
+func decodeWebhookPayload(body io.Reader) (WebhookPayload, error) {
+	var payload WebhookPayload
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		return WebhookPayload{}, err
+	}
+
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != nil {
+		if errors.Is(err, io.EOF) {
+			return payload, nil
+		}
+		return WebhookPayload{}, err
+	}
+
+	return WebhookPayload{}, errors.New("multiple JSON values are not allowed")
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {

@@ -181,6 +181,86 @@ func TestWebhookAdapterAuditsMalformedPayload(t *testing.T) {
 	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.invalid_payload.failure", "webhook payload rejected as invalid", webhookInvalidPayloadCode, webhookInvalidPayloadCode)
 }
 
+func TestWebhookAdapterRejectsTrailingExtraJSONAsInvalidPayload(t *testing.T) {
+	t.Parallel()
+
+	audits := &auditRecorder{}
+	logs := &bytes.Buffer{}
+	tracer := runtimecore.NewTraceRecorder()
+	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(logs), audits)
+	adapter.Tracer = tracer
+	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBufferString(`{"event_type":"webhook.received","source":"webhook"}{"unexpected":true}`))
+	request.RemoteAddr = "10.0.0.9:8080"
+	recorder := httptest.NewRecorder()
+
+	adapter.HandleWebhook(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", contentType)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["status"] != "error" || payload["code"] != webhookInvalidPayloadCode || payload["message"] != webhookInvalidPayloadMessage {
+		t.Fatalf("expected stable invalid-payload failure payload, got %+v", payload)
+	}
+	traceID, _ := payload["trace_id"].(string)
+	if traceID == "" {
+		t.Fatalf("expected trace_id in invalid-payload failure payload, got %+v", payload)
+	}
+	if _, ok := payload["event_id"]; ok {
+		t.Fatalf("expected invalid-payload rejection before event creation, got %+v", payload)
+	}
+	if len(audits.entries) != 1 || audits.entries[0].Action != "webhook.reject.invalid_payload" || audits.entries[0].Actor != "10.0.0.9:8080" || audits.entries[0].Allowed || audits.entries[0].Reason != "webhook_invalid_payload" {
+		t.Fatalf("unexpected audit entries %+v", audits.entries)
+	}
+	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.invalid_payload.failure", "webhook payload rejected as invalid", webhookInvalidPayloadCode, webhookInvalidPayloadCode)
+}
+
+func TestWebhookAdapterRejectsUnknownTopLevelFieldAsInvalidPayload(t *testing.T) {
+	t.Parallel()
+
+	audits := &auditRecorder{}
+	logs := &bytes.Buffer{}
+	tracer := runtimecore.NewTraceRecorder()
+	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(logs), audits)
+	adapter.Tracer = tracer
+	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBufferString(`{"event_type":"webhook.received","source":"webhook","unknown_field":true}`))
+	request.RemoteAddr = "10.0.0.10:8080"
+	recorder := httptest.NewRecorder()
+
+	adapter.HandleWebhook(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", contentType)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["status"] != "error" || payload["code"] != webhookInvalidPayloadCode || payload["message"] != webhookInvalidPayloadMessage {
+		t.Fatalf("expected stable invalid-payload failure payload, got %+v", payload)
+	}
+	traceID, _ := payload["trace_id"].(string)
+	if traceID == "" {
+		t.Fatalf("expected trace_id in invalid-payload failure payload, got %+v", payload)
+	}
+	if _, ok := payload["event_id"]; ok {
+		t.Fatalf("expected invalid-payload rejection before event creation, got %+v", payload)
+	}
+	if len(audits.entries) != 1 || audits.entries[0].Action != "webhook.reject.invalid_payload" || audits.entries[0].Actor != "10.0.0.10:8080" || audits.entries[0].Allowed || audits.entries[0].Reason != "webhook_invalid_payload" {
+		t.Fatalf("unexpected audit entries %+v", audits.entries)
+	}
+	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.invalid_payload.failure", "webhook payload rejected as invalid", webhookInvalidPayloadCode, webhookInvalidPayloadCode)
+}
+
 func TestWebhookAdapterResponseContainsEventIDs(t *testing.T) {
 	t.Parallel()
 
