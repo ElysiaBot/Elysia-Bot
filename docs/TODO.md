@@ -11,21 +11,6 @@
 
 ## Active
 
-### B7. secrets 进入主路径
-- 目标：让 secret 正式成为 plugin / provider / adapter 的统一配置来源。
-- 直接子步骤：
-  - 先定义 secret resolution 在配置装载链路中的固定入口，不让 plugin、provider、adapter 各自解析。
-  - 明确 secret 引用格式和解析失败时机，区分“引用不存在”“格式非法”“来源不可用”。
-  - 为 plugin config 接入 secret resolution，保证插件作者能使用统一方式声明敏感配置。
-  - 为 provider / adapter 配置接入同样的解析路径，避免只在某一类配置里可用。
-  - 把 missing / invalid secret 错误做成 caller-facing 信息，至少能定位到哪个字段解析失败。
-  - 补最小可观测字段，至少能看到 secret 来自哪个 source、是否解析成功，但不泄露 secret 实值。
-  - 明确日志与读面里的脱敏规则，避免错误输出把 secret 内容打出来。
-
----
-
-## Backlog
-
 ### B8. 告警 / 通知最小闭环
 - 目标：让关键故障不只存在日志里。
 - 直接子步骤：
@@ -37,6 +22,10 @@
   - 定义最小告警载荷，至少包含对象标识、故障类型、首次发生时间、最近发生时间、最近错误原因。
   - 增加最小恢复通知或恢复状态更新，避免问题恢复后仍一直悬挂。
   - 做最小去重策略，避免同一故障在短时间内刷屏。
+
+---
+
+## Backlog
 
 ### B9. replay / retry / dead-letter operator workflow
 - 目标：把失败后的人工处理路径做成平台能力。
