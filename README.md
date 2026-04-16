@@ -162,10 +162,10 @@ go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmok
 
 ## 插件开发最小入口
 
-当前仓库内新插件开发的推荐入口已经收口到：
+当前仓库内新插件开发与后续任务推进的推荐入口已经收口到：
 
 - `plugins/plugin-template-smoke/README.md`
-- `docs/plugin-dev/plugin-template-v0.md`
+- `docs/TODO.md`
 
 其中：
 
