@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,130 @@ func writeScheduleCancelRBACConfig(t *testing.T) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func decodeRuntimeConfigCheckResult(t *testing.T, raw []byte) runtimeConfigCheckResult {
+	t.Helper()
+	var result runtimeConfigCheckResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode runtime config check result: %v\nraw=%s", err, string(raw))
+	}
+	return result
+}
+
+func TestRuntimeCLIConfigCheckPassesWithEnvOverrides(t *testing.T) {
+	configPath := writeTestConfig(t)
+	overrideSQLitePath := filepath.ToSlash(filepath.Join(t.TempDir(), "runtime-override.sqlite"))
+	t.Setenv("BOT_PLATFORM_RUNTIME_SQLITE_PATH", overrideSQLitePath)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	served := false
+	exitCode := runRuntimeCLI([]string{"-config", configPath, "-check-config"}, &stdout, &stderr, func(addr string, handler http.Handler) error {
+		served = true
+		return nil
+	})
+	if exitCode != 0 {
+		t.Fatalf("expected config check exit code 0, got %d, stderr=%s", exitCode, stderr.String())
+	}
+	if served {
+		t.Fatal("expected config check to exit before starting the HTTP server")
+	}
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Fatalf("expected empty stderr for config check success, got %s", stderr.String())
+	}
+	result := decodeRuntimeConfigCheckResult(t, stdout.Bytes())
+	if result.Status != "ok" {
+		t.Fatalf("expected ok status, got %+v", result)
+	}
+	if result.Mode != "check-config" {
+		t.Fatalf("expected mode check-config, got %+v", result)
+	}
+	if result.ConfigPath != configPath {
+		t.Fatalf("expected config path %q, got %+v", configPath, result)
+	}
+	if result.SQLitePath != overrideSQLitePath {
+		t.Fatalf("expected sqlite override path %q, got %+v", overrideSQLitePath, result)
+	}
+	if result.SmokeStoreBackend != "sqlite" {
+		t.Fatalf("expected sqlite smoke store backend, got %+v", result)
+	}
+	if result.HTTPServerStarted {
+		t.Fatalf("expected http_server_started=false, got %+v", result)
+	}
+}
+
+func TestRuntimeCLIConfigCheckFailsLoudlyOnBadPostgresDSN(t *testing.T) {
+	configPath := writeTestConfigWithPostgresSmokeStoreAt(t, t.TempDir(), "postgres://127.0.0.1:1/runtime_smoke?sslmode=disable")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	served := false
+	exitCode := runRuntimeCLI([]string{"-config", configPath, "-check-config"}, &stdout, &stderr, func(addr string, handler http.Handler) error {
+		served = true
+		return nil
+	})
+	if exitCode == 0 {
+		t.Fatal("expected config check to fail for bad postgres smoke store DSN")
+	}
+	if served {
+		t.Fatal("expected failing config check to exit before starting the HTTP server")
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected empty stdout for config check failure, got %s", stdout.String())
+	}
+	result := decodeRuntimeConfigCheckResult(t, stderr.Bytes())
+	if result.Status != "error" {
+		t.Fatalf("expected error status, got %+v", result)
+	}
+	if result.Mode != "check-config" {
+		t.Fatalf("expected mode check-config, got %+v", result)
+	}
+	for _, expected := range []string{"open runtime smoke store", "postgres"} {
+		if !strings.Contains(result.Error, expected) {
+			t.Fatalf("expected config check error to include %q, got %+v", expected, result)
+		}
+	}
+	if result.HTTPServerStarted {
+		t.Fatalf("expected http_server_started=false, got %+v", result)
+	}
+}
+
+func TestRuntimeCLINormalStartupInvokesHTTPServer(t *testing.T) {
+	configPath := writeTestConfig(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	served := false
+	exitCode := runRuntimeCLI([]string{"-config", configPath}, &stdout, &stderr, func(addr string, handler http.Handler) error {
+		served = true
+		if addr != ":18080" {
+			t.Fatalf("expected runtime to serve on :18080, got %q", addr)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("expected healthz 200 before serve, got %d: %s", resp.Code, resp.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode healthz payload: %v", err)
+		}
+		if payload["status"] != "ok" {
+			t.Fatalf("expected healthz status ok, got %+v", payload)
+		}
+		return nil
+	})
+	if exitCode != 0 {
+		t.Fatalf("expected normal startup exit code 0, got %d, stderr=%s", exitCode, stderr.String())
+	}
+	if !served {
+		t.Fatal("expected normal startup path to invoke HTTP server")
+	}
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Fatalf("expected empty stderr for normal startup success, got %s", stderr.String())
+	}
 }
 
 func TestRuntimeAppDemoOneBotMessage(t *testing.T) {

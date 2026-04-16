@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -61,6 +60,21 @@ type runtimeSmokeStore interface {
 	HasIdempotencyKey(context.Context, string) (bool, error)
 	Counts(context.Context) (map[string]int, error)
 	Close() error
+}
+
+type runtimeServeFunc func(string, http.Handler) error
+
+type runtimeConfigCheckResult struct {
+	Status              string `json:"status"`
+	Mode                string `json:"mode"`
+	ConfigPath          string `json:"config_path"`
+	Environment         string `json:"environment,omitempty"`
+	HTTPPort            int    `json:"http_port,omitempty"`
+	SQLitePath          string `json:"sqlite_path,omitempty"`
+	SmokeStoreBackend   string `json:"smoke_store_backend,omitempty"`
+	SchedulerIntervalMs int    `json:"scheduler_interval_ms,omitempty"`
+	HTTPServerStarted   bool   `json:"http_server_started"`
+	Error               string `json:"error,omitempty"`
 }
 
 type sqliteRuntimeSmokeStore struct {
@@ -287,6 +301,13 @@ func demoOneBotAdapterInstanceState(settings appRuntimeSettings) (runtimecore.Ad
 }
 
 func newRuntimeApp(configPath string) (*runtimeApp, error) {
+	return newRuntimeAppWithOutput(configPath, os.Stdout)
+}
+
+func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, error) {
+	if output == nil {
+		output = io.Discard
+	}
 	config, err := runtimecore.LoadConfig(configPath)
 	if err != nil {
 		return nil, err
@@ -297,7 +318,7 @@ func newRuntimeApp(configPath string) (*runtimeApp, error) {
 	}
 
 	logs := &logBuffer{}
-	logger := runtimecore.NewLogger(io.MultiWriter(os.Stdout, logs))
+	logger := runtimecore.NewLogger(io.MultiWriter(output, logs))
 	tracer := runtimecore.NewTraceRecorder()
 	metrics := runtimecore.NewMetricsRegistry()
 	replies := newReplyBuffer(logger, tracer)
@@ -399,7 +420,7 @@ func newRuntimeApp(configPath string) (*runtimeApp, error) {
 		return nil, fmt.Errorf("save onebot demo adapter instance: %w", err)
 	}
 
-	ingressLogs := io.MultiWriter(os.Stdout, logs)
+	ingressLogs := io.MultiWriter(output, logs)
 	onebotIngress := adapteronebot.NewIngressConverter(ingressLogs)
 	onebotIngress.SetObservability(tracer)
 
@@ -1393,19 +1414,82 @@ func stringValue(value any) string {
 	return ""
 }
 
-func main() {
-	configPath := flag.String("config", "deploy/config.dev.yaml", "path to runtime config")
-	flag.Parse()
+func writeRuntimeConfigCheckResult(w io.Writer, result runtimeConfigCheckResult) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(result)
+}
 
-	app, err := newRuntimeApp(*configPath)
-	if err != nil {
-		log.Fatalf("start runtime app: %v", err)
+func writeRuntimeConfigCheckFailure(w io.Writer, configPath string, err error) {
+	if w == nil {
+		return
 	}
-	defer func() {
-		if err := app.Close(); err != nil {
-			log.Printf("close runtime app: %v", err)
+	if err := writeRuntimeConfigCheckResult(w, runtimeConfigCheckResult{
+		Status:            "error",
+		Mode:              "check-config",
+		ConfigPath:        configPath,
+		HTTPServerStarted: false,
+		Error:             err.Error(),
+	}); err != nil {
+		_, _ = fmt.Fprintf(w, "runtime config check failed: %v\n", err)
+	}
+}
+
+func runRuntimeCLI(args []string, stdout io.Writer, stderr io.Writer, serve runtimeServeFunc) int {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if serve == nil {
+		serve = http.ListenAndServe
+	}
+
+	flags := flag.NewFlagSet("runtime", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "deploy/config.dev.yaml", "path to runtime config")
+	checkConfig := flags.Bool("check-config", false, "validate runtime config and exit before starting the HTTP server")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+
+	bootstrapOutput := stdout
+	if *checkConfig {
+		bootstrapOutput = io.Discard
+	}
+	app, err := newRuntimeAppWithOutput(*configPath, bootstrapOutput)
+	if err != nil {
+		if *checkConfig {
+			writeRuntimeConfigCheckFailure(stderr, *configPath, err)
+		} else {
+			_, _ = fmt.Fprintf(stderr, "start runtime app: %v\n", err)
 		}
-	}()
+		return 1
+	}
+
+	if *checkConfig {
+		closeErr := app.Close()
+		if closeErr != nil {
+			writeRuntimeConfigCheckFailure(stderr, *configPath, fmt.Errorf("close runtime app: %w", closeErr))
+			return 1
+		}
+		if err := writeRuntimeConfigCheckResult(stdout, runtimeConfigCheckResult{
+			Status:              "ok",
+			Mode:                "check-config",
+			ConfigPath:          *configPath,
+			Environment:         app.config.Runtime.Environment,
+			HTTPPort:            app.config.Runtime.HTTPPort,
+			SQLitePath:          app.settings.SQLitePath,
+			SmokeStoreBackend:   app.settings.SmokeStoreBackend,
+			SchedulerIntervalMs: app.settings.SchedulerIntervalMs,
+			HTTPServerStarted:   false,
+		}); err != nil {
+			_, _ = fmt.Fprintf(stderr, "write config check result: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 
 	addr := fmt.Sprintf(":%d", app.config.Runtime.HTTPPort)
 	if err := app.logger.Log("info", "runtime app starting", runtimecore.LogContext{}, map[string]any{
@@ -1416,12 +1500,32 @@ func main() {
 		"demo_path":    "/demo/onebot/message",
 		"metrics_path": "/metrics",
 	}); err != nil {
-		log.Fatalf("log startup: %v", err)
+		closeErr := app.Close()
+		if closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close runtime app: %w", closeErr))
+		}
+		_, _ = fmt.Fprintf(stderr, "log startup: %v\n", err)
+		return 1
 	}
 
-	if err := http.ListenAndServe(addr, app); err != nil {
-		log.Fatalf("listen and serve: %v", err)
+	serveErr := serve(addr, app)
+	closeErr := app.Close()
+	if serveErr != nil {
+		if closeErr != nil {
+			serveErr = errors.Join(serveErr, fmt.Errorf("close runtime app: %w", closeErr))
+		}
+		_, _ = fmt.Fprintf(stderr, "listen and serve: %v\n", serveErr)
+		return 1
 	}
+	if closeErr != nil {
+		_, _ = fmt.Fprintf(stderr, "close runtime app: %v\n", closeErr)
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	os.Exit(runRuntimeCLI(os.Args[1:], os.Stdout, os.Stderr, nil))
 }
 
 func loadAppRuntimeSettings(path string) (appRuntimeSettings, error) {
