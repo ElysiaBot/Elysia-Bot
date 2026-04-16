@@ -24,7 +24,7 @@
 - `TemplatePluginModule`
 - `TemplatePluginSymbol`
 
-这样可以让 [`New()`](plugins/plugin-template-smoke/plugin.go:28) 构造出的 manifest、[`Definition()`](plugins/plugin-template-smoke/plugin.go:52) 暴露的入口，以及 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go:9) 的模板一致性校验保持同步。
+这样可以让 [`New()`](plugins/plugin-template-smoke/plugin.go)、[`Definition()`](plugins/plugin-template-smoke/plugin.go) 暴露的 manifest，以及 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go) 对静态 `manifest.json` 的关键 developer-entry 字段校验保持同步。
 
 ## 当前真实开发入口
 
@@ -35,7 +35,9 @@
 3. 把新模块接入 [`go.work`](go.work)；如果要被 [`tests/e2e`](tests/e2e) 直接 import，再补 [`tests/e2e/go.mod`](tests/e2e/go.mod) 的 `require/replace`。
 4. 运行插件单测与 e2e smoke，确认 runtime 注册与事件分发链路仍成立。
 
-## 验证命令
+## 聚焦验证命令
+
+开发模板入口时，优先跑这一条：
 
 ```bash
 go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmoke|TestTemplateManifestConstantsStayInSync"
@@ -43,7 +45,7 @@ go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmok
 
 这条命令覆盖：
 
-- 模板 manifest / entry 常量是否与代码一致
+- 静态 `manifest.json` 是否仍与 `plugin.go` / `Definition().Manifest` 的关键 developer-entry 字段一致
 - 事件型插件最小回复路径
 - 缺失 reply handle 的坏输入
 - reply service 错误冒泡
@@ -52,5 +54,5 @@ go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmok
 ## 已知限制
 
 - 当前模板只覆盖 `OnEvent(...)` 事件型插件入口，不直接生成 `OnJob(...)`、`OnSchedule(...)`、`OnCommand(...)` 多入口样板。
-- [`manifest.json`](plugins/plugin-template-smoke/manifest.json) 仍是独立静态文件；仓库当前没有自动校验它与 [`plugin.go`](plugins/plugin-template-smoke/plugin.go) 中 manifest 完全逐字段同步。
+- [`manifest.json`](plugins/plugin-template-smoke/manifest.json) 仍是独立静态文件；当前由 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go) 把 [`plugin.go`](plugins/plugin-template-smoke/plugin.go) / `Definition().Manifest` 作为关键 developer-entry 字段的真值来源，但这不是新的 CLI、脚手架或完整逐字段生成器。
 - 当前 smoke 使用 [`DirectPluginHost`](packages/runtime-core/runtime.go:899) 做进程内验证，证明的是 runtime 注册与 dispatch 合约，不是完整 subprocess host 生命周期。

@@ -171,8 +171,14 @@ go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmok
 
 - `plugins/plugin-template-smoke` 是当前唯一明确面向“复制 -> 改名 -> 注册 -> smoke”的模板目录。
 - `plugins/plugin-template-smoke/plugin.go` 提供最小事件型插件骨架。
-- `plugins/plugin-template-smoke/template_test.go` 提供模板常量与 manifest 入口一致性的最小校验。
+- `plugins/plugin-template-smoke/template_test.go` 会读取静态 `manifest.json`，并把 `plugin.go` / `Definition().Manifest` 作为关键 developer-entry 字段的一致性真值来源。
 - `tests/e2e/plugin_template_chain_test.go` 提供 create -> register -> runtime dispatch -> reply 的稳定 smoke 证据。
+
+针对这条模板开发入口，当前推荐的聚焦验证命令是：
+
+```bash
+go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmoke|TestTemplateManifestConstantsStayInSync"
+```
 
 ## 当前已知限制
 
@@ -182,5 +188,5 @@ go test ./plugins/plugin-template-smoke ./tests/e2e -run "TestPluginTemplateSmok
 - Console 当前主要基于 runtime 内存态 + 最近一次 dispatch 结果，尚未形成独立持久化插件读模型。
 - `GET /api/console` 当前声明的是已有运行时事实与局部策略边界，不等同于完整鉴权、完整 replay namespace/policy、完整 rollout 控制面或统一 transport taxonomy。
 - 当前插件模板只覆盖最小事件型入口；job / schedule / command 插件仍需参考现有官方插件按需扩展。
-- `plugins/plugin-template-smoke/manifest.json` 仍需手工与 `New()` 返回的 manifest 保持同步；仓库尚未提供独立的 manifest 文件自动对齐校验器。
+- `plugins/plugin-template-smoke/manifest.json` 仍是独立静态文件；当前已由 `plugins/plugin-template-smoke/template_test.go` 把 `plugin.go` / `Definition().Manifest` 作为关键 developer-entry 字段的对齐真值来源，但仓库仍未提供独立的 manifest 生成器或脚手架系统。
 - 插件失败排障当前已对多条最小失败/边界链提供闭环证据；当前已把 instance-config recursive reject chain 从一层 nested 再向 deeper nested scalar mismatch、相邻的 deeper nested array / object actual value mismatch、deeper nested required missing 与 deeper nested enum out-of-set 推进一步，并把相邻的 deeper nested default-only 收口为“不注入、不拒绝”的真实边界；同时也已确认超出当前 helper 深度的 `settings.labels.naming.prefix=true`、`settings.labels.naming.prefix=["oops"]`、`settings.labels.naming.prefix={"bad":true}`、`settings.labels.naming=true`、`settings.labels.naming=["oops"]`、`settings.labels.naming={}`（配合 deeper `required`）、`settings.labels.naming.prefix="oops"`（配合 deeper `enum=["hello","world"]`）、`settings.labels.naming.required=["prefix"]` + `settings.labels.naming.properties.prefix.default="hello"` + `settings.labels.naming={}`、`settings.labels.naming.properties.prefix.enum=["hello","world"]` + `default="hello"` + `settings.labels.naming={}`、`settings.labels.naming.required=["prefix"]` + `settings.labels.naming.properties.prefix.enum=["hello","world"]` + `default="hello"` + `settings.labels.naming={}`、`settings.labels={}`（同一 triple schema 下 `naming` child omission），以及同一 triple schema 下的 `settings.labels.naming.required=["prefix"]` + `settings.labels.naming.properties.prefix.enum=["hello","world"]` + `default="hello"` + `settings.labels.naming.prefix="oops"|["oops"]|true` 与 `settings.labels.naming=["oops"]|null` 这组 mixed / triple / explicit-bad-value / child-omission boundary，都会停止在当前 helper 覆盖边界并继续透传到 subprocess request / fixture / runtime。以上都不等于完整 recursive validator、任意深度 `type` / `enum` 校验、任意深度 `required/default`、任意深度 `enum/default`、任意深度 `required/enum/default` 协同或 default merge；更深层级递归系统化、default merge 系统、除本次已确认的 mixed / triple / explicit bad value / explicit array-valued bad value / explicit wrong-type bad value / explicit object-valued bad value / explicit object-node bad value / explicit array-valued object-node bad value / child omission boundary 外同一 beyond-helper object child 上其他多规则叠加边界，以及共享 runtime+host metrics registry 下的 error dedupe 仍未覆盖。
