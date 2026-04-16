@@ -3,6 +3,8 @@ package pluginsdk
 import (
 	"errors"
 	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,7 +15,12 @@ const (
 	ModeInProc     = "inproc"
 	ModeSubprocess = "subprocess"
 	ModeRemote     = "remote"
+
+	PublishSourceTypeGit     = "git"
+	PublishSourceTypeArchive = "archive"
 )
+
+var runtimeVersionRangePattern = regexp.MustCompile(`^(>=|>|=|<=|<)\s*v?\d+\.\d+\.\d+(?:\s+(>=|>|=|<=|<)\s*v?\d+\.\d+\.\d+)?$`)
 
 type PluginManifest struct {
 	ID           string         `json:"id"`
@@ -23,7 +30,14 @@ type PluginManifest struct {
 	Mode         string         `json:"mode"`
 	Permissions  []string       `json:"permissions,omitempty"`
 	ConfigSchema map[string]any `json:"configSchema,omitempty"`
+	Publish      *PluginPublish `json:"publish,omitempty"`
 	Entry        PluginEntry    `json:"entry"`
+}
+
+type PluginPublish struct {
+	SourceType          string `json:"sourceType"`
+	SourceURI           string `json:"sourceUri"`
+	RuntimeVersionRange string `json:"runtimeVersionRange"`
 }
 
 type PluginEntry struct {
@@ -406,6 +420,42 @@ func (m PluginManifest) Validate() error {
 			return fmt.Errorf("permissions: %w", err)
 		}
 	}
+	if m.Publish != nil {
+		if err := m.Publish.Validate(); err != nil {
+			return fmt.Errorf("publish: %w", err)
+		}
+	}
+	return nil
+}
+
+func (p PluginPublish) Validate() error {
+	sourceType := strings.TrimSpace(p.SourceType)
+	if sourceType == "" {
+		return errors.New("sourceType is required")
+	}
+	switch sourceType {
+	case PublishSourceTypeGit, PublishSourceTypeArchive:
+	default:
+		return fmt.Errorf("unsupported sourceType %q", p.SourceType)
+	}
+
+	sourceURI := strings.TrimSpace(p.SourceURI)
+	if sourceURI == "" {
+		return errors.New("sourceUri is required")
+	}
+	parsedSourceURI, err := url.Parse(sourceURI)
+	if err != nil || !parsedSourceURI.IsAbs() || parsedSourceURI.Host == "" {
+		return fmt.Errorf("sourceUri %q must be an absolute URI", p.SourceURI)
+	}
+
+	runtimeVersionRange := strings.TrimSpace(p.RuntimeVersionRange)
+	if runtimeVersionRange == "" {
+		return errors.New("runtimeVersionRange is required")
+	}
+	if !runtimeVersionRangePattern.MatchString(runtimeVersionRange) {
+		return fmt.Errorf("runtimeVersionRange %q must use one or two comparator clauses", p.RuntimeVersionRange)
+	}
+
 	return nil
 }
 

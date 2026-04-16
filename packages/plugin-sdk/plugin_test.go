@@ -1,6 +1,7 @@
 package pluginsdk
 
 import (
+	"strings"
 	"testing"
 
 	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
@@ -67,6 +68,101 @@ func TestPluginManifestValidateRejectsInvalidManifest(t *testing.T) {
 	}
 	if err := manifest.Validate(); err == nil {
 		t.Fatal("expected unsupported mode to fail validation")
+	}
+}
+
+func TestPluginManifestValidateAcceptsPublishMetadata(t *testing.T) {
+	t.Parallel()
+
+	manifest := PluginManifest{
+		ID:         "plugin-published",
+		Name:       "Published Plugin",
+		Version:    "0.1.0",
+		APIVersion: "v0",
+		Mode:       ModeSubprocess,
+		Publish: &PluginPublish{
+			SourceType:          PublishSourceTypeGit,
+			SourceURI:           "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo",
+			RuntimeVersionRange: ">=0.1.0 <1.0.0",
+		},
+		Entry: PluginEntry{Module: "plugins/published", Symbol: "Plugin"},
+	}
+
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("expected publish metadata to validate, got %v", err)
+	}
+}
+
+func TestPluginManifestValidateRejectsInvalidPublishMetadata(t *testing.T) {
+	t.Parallel()
+
+	base := PluginManifest{
+		ID:         "plugin-published",
+		Name:       "Published Plugin",
+		Version:    "0.1.0",
+		APIVersion: "v0",
+		Mode:       ModeSubprocess,
+		Publish: &PluginPublish{
+			SourceType:          PublishSourceTypeGit,
+			SourceURI:           "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo",
+			RuntimeVersionRange: ">=0.1.0 <1.0.0",
+		},
+		Entry: PluginEntry{Module: "plugins/published", Symbol: "Plugin"},
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*PluginManifest)
+		wantErrMsg string
+	}{
+		{
+			name: "missing source type",
+			mutate: func(manifest *PluginManifest) {
+				manifest.Publish.SourceType = ""
+			},
+			wantErrMsg: "sourceType is required",
+		},
+		{
+			name: "unsupported source type",
+			mutate: func(manifest *PluginManifest) {
+				manifest.Publish.SourceType = "directory"
+			},
+			wantErrMsg: "unsupported sourceType",
+		},
+		{
+			name: "invalid source uri",
+			mutate: func(manifest *PluginManifest) {
+				manifest.Publish.SourceURI = "plugins/plugin-echo"
+			},
+			wantErrMsg: "sourceUri",
+		},
+		{
+			name: "invalid runtime version range",
+			mutate: func(manifest *PluginManifest) {
+				manifest.Publish.RuntimeVersionRange = "v0"
+			},
+			wantErrMsg: "runtimeVersionRange",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			manifest := base
+			publish := *base.Publish
+			manifest.Publish = &publish
+			tt.mutate(&manifest)
+
+			err := manifest.Validate()
+			if err == nil {
+				t.Fatal("expected publish validation to fail")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrMsg) {
+				t.Fatalf("expected error to contain %q, got %v", tt.wantErrMsg, err)
+			}
+		})
 	}
 }
 

@@ -15,6 +15,11 @@
       }
     }
   },
+  "publish": {
+    "sourceType": "git",
+    "sourceUri": "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo",
+    "runtimeVersionRange": ">=0.1.0 <1.0.0"
+  },
   "entry": {
     "module": "plugins/plugin-echo",
     "symbol": "Plugin"

@@ -26,6 +26,8 @@
 
 这样可以让 [`New()`](plugins/plugin-template-smoke/plugin.go)、[`Definition()`](plugins/plugin-template-smoke/plugin.go) 暴露的 manifest，以及 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go) 对静态 `manifest.json` 的关键 developer-entry 字段校验保持同步。
 
+当前模板里的代码 manifest 与静态 `manifest.json` 也都会展示一个最小 `publish` 元数据块，用来声明发布来源与 runtime 兼容范围。
+
 ## 当前真实开发入口
 
 最小创建与验证路径是：

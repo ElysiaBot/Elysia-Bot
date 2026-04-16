@@ -28,14 +28,25 @@ func TestTemplateManifestConstantsStayInSync(t *testing.T) {
 	if manifest.Entry.Symbol != TemplatePluginSymbol {
 		t.Fatalf("manifest entry symbol = %q, want %q", manifest.Entry.Symbol, TemplatePluginSymbol)
 	}
-	if manifest.Mode != pluginsdk.ModeSubprocess {
-		t.Fatalf("manifest mode = %q, want %q", manifest.Mode, pluginsdk.ModeSubprocess)
+	if manifest.Mode != "subprocess" {
+		t.Fatalf("manifest mode = %q, want %q", manifest.Mode, "subprocess")
 	}
 	if len(manifest.Permissions) != 1 || manifest.Permissions[0] != "reply:send" {
 		t.Fatalf("unexpected manifest permissions %+v", manifest.Permissions)
 	}
 	if manifest.ConfigSchema["type"] != "object" {
 		t.Fatalf("unexpected config schema %+v", manifest.ConfigSchema)
+	}
+
+	manifestPayload := readManifestPayload(t, plugin.Definition().Manifest)
+	staticManifestPayload := readManifestPayload(t, staticManifest)
+	expectedPublish := map[string]any{
+		"sourceType":          TemplatePluginPublishSourceType,
+		"sourceUri":           TemplatePluginPublishSourceURI,
+		"runtimeVersionRange": TemplatePluginRuntimeVersionRange,
+	}
+	if !reflect.DeepEqual(manifestPayload["publish"], expectedPublish) {
+		t.Fatalf("manifest publish = %+v, want %+v", manifestPayload["publish"], expectedPublish)
 	}
 
 	if staticManifest.ID != manifest.ID {
@@ -59,6 +70,9 @@ func TestTemplateManifestConstantsStayInSync(t *testing.T) {
 	if !reflect.DeepEqual(staticManifest.ConfigSchema, manifest.ConfigSchema) {
 		t.Fatalf("manifest.json config schema = %+v, want %+v", staticManifest.ConfigSchema, manifest.ConfigSchema)
 	}
+	if !reflect.DeepEqual(staticManifestPayload["publish"], manifestPayload["publish"]) {
+		t.Fatalf("manifest.json publish = %+v, want %+v", staticManifestPayload["publish"], manifestPayload["publish"])
+	}
 	if staticManifest.Entry.Module != manifest.Entry.Module {
 		t.Fatalf("manifest.json entry module = %q, want %q", staticManifest.Entry.Module, manifest.Entry.Module)
 	}
@@ -81,4 +95,20 @@ func readStaticManifest(t *testing.T) pluginsdk.PluginManifest {
 	}
 
 	return manifest
+}
+
+func readManifestPayload(t *testing.T, manifest any) map[string]any {
+	t.Helper()
+
+	rawManifest, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest payload: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rawManifest, &payload); err != nil {
+		t.Fatalf("unmarshal manifest payload: %v", err)
+	}
+
+	return payload
 }

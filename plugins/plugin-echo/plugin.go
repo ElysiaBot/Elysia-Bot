@@ -8,6 +8,11 @@ import (
 	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 )
 
+const (
+	pluginEchoPublishSourceURI    = "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo"
+	pluginEchoRuntimeVersionRange = ">=0.1.0 <1.0.0"
+)
+
 type Config struct {
 	Prefix string `json:"prefix"`
 }
@@ -34,6 +39,11 @@ func New(replyService pluginsdk.ReplyService, config Config) Plugin {
 				"properties": map[string]any{
 					"prefix": map[string]any{"type": "string"},
 				},
+			},
+			Publish: &pluginsdk.PluginPublish{
+				SourceType:          pluginsdk.PublishSourceTypeGit,
+				SourceURI:           pluginEchoPublishSourceURI,
+				RuntimeVersionRange: pluginEchoRuntimeVersionRange,
 			},
 			Entry: pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
 		},
