@@ -12,36 +12,16 @@
 
 ## Active
 
-### T2. adapter-webhook invalid_payload decode fidelity 严格收口
-- 目标：让 `adapters/adapter-webhook` 对尾随额外 JSON 与未知顶层字段都按 `invalid_payload` 拒绝，同时保持现有 payload / audit / trace 行为不回退。
-- 范围：
-  - 只动 `adapters/adapter-webhook`
-  - 只动受影响测试
-  - 必要时只更新本文件中的状态
+### T4. Console 读面继续收口到重启后的运行事实
+- 目标：让 `GET /api/console` 在 restart 后更忠实反映 persisted / recovered state，而不是继续优先暴露内存态瞬时结果。
 - 完成标准：
-  - trailing extra JSON 与 unknown top-level fields 都稳定落到 `invalid_payload`
-  - 现有 payload / audit / `trace_id` 行为不回退
-  - `go test ./adapters/adapter-webhook -count=1` 通过
+  - 至少补齐 1 类 job / schedule / plugin 状态在 `GET /api/console` 中的 persisted / recovered evidence 映射
+  - 返回结果能清楚区分 live overlay 与 persisted / recovered state，避免重启后读面失真
+  - 相关 `apps/runtime` Console API 测试与 `packages/runtime-core` 恢复语义测试通过
 
 ---
 
 ## Next
-
-### T3. Job / Scheduler / 恢复语义最小闭环增强
-- 目标：从 `packages/runtime-core` 中挑 1 个最小恢复语义缺口补齐。
-- 优先方向：
-  - restart 后 job 状态解释
-  - retrying / running / pending 恢复边界
-  - schedule reload / invalid persisted plan 行为可解释性
-- 完成标准：
-  - 至少形成 1 条真实恢复链的代码 + 测试闭环
-  - 不扩成完整 worker / lease / distributed scheduler 系统
-
-### T4. Console 读面从“内存态优先”继续推向“运行事实优先”
-- 目标：让 `GET /api/console` 更可信地反映 restart 后的 persisted / recovered state。
-- 完成标准：
-  - 至少补齐 1 类 job / schedule / plugin 状态事实来源
-  - 明确区分 live overlay 与 persisted / recovered evidence
 
 ### T5. 插件管理最小闭环
 - 目标：补一个最小可用的插件管理入口，而不是只有静态注册与模板。
