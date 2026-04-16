@@ -4,8 +4,7 @@
 - 只保留还要做的事，不保留历史总结。
 - 每个任务都要能直接开工，避免“继续研究”“统一梳理”这类空任务。
 - 同时只允许 1 个 active。
-- next 保留 3~7 个。
-- 更远期但明确要做的，放 backlog。
+- backlog 中每项都要写到可以直接切 slice。
 - 已完成任务直接从本文件删除，不做归档。
 
 ---
@@ -14,15 +13,20 @@
 
 ### B2. bot / adapter / plugin 生命周期状态页
 - 目标：形成成熟机器人项目常见的统一运行状态面。
-- 最小关注项：
-  - bot 是否在线
-  - adapter 是否健康
-  - plugin 是否启用
-  - 最近一次失败原因 / 时间
-
----
-
-## Next
+- 完成标准：
+  - `bot`、`adapter`、`plugin` 三类对象都能在同一读面中看到当前状态。
+  - 每类对象都能看到最近一次失败时间、失败原因、最近一次恢复或成功时间。
+  - 状态字段含义稳定，Console API 与 Console Web 不各自发明状态名。
+- 直接子步骤：
+  - 先固定三类对象的最小状态枚举，至少覆盖 `online/ready`、`degraded`、`failed`、`disabled` 这类当前读面需要的语义。
+  - 为 `bot` 补齐实例标识、在线状态、最近心跳或最近成功连接时间。
+  - 为 `adapter` 补齐健康状态、最近连接错误、最近恢复时间。
+  - 为 `plugin` 补齐启用状态、运行状态、最近一次失败原因、最近一次失败时间。
+  - 明确“未启用”“未加载”“启动失败”“运行中失败”的区分，不把不同失败阶段混成一个状态。
+  - 把这些状态收口到统一返回结构，避免 Console API、runtime 内部状态、Web 展示字段各自命名。
+  - 为 Console API 增加最小测试，覆盖正常态、禁用态、失败态、恢复后状态刷新。
+  - 为 Console Web 补齐对应展示，确保列表页或详情页能直接看到最近失败原因 / 时间。
+  - 明确没有历史数据时的空值表现，避免前端靠猜测拼文案。
 
 ---
 
@@ -30,127 +34,179 @@
 
 ### B3. 插件开发者入口标准化
 - 目标：把 `plugin-template-smoke` 提升为正式开发入口。
-- 子任务方向：
-  - 创建插件流程统一
-  - manifest / README / smoke test 模板统一
-  - 开发文档最小化到模板和命令本身
-  - “复制 -> 改名 -> 注册 -> smoke” 变成稳定路径
+- 直接子步骤：
+  - 固定“复制模板 -> 改包名/目录名 -> 改 manifest -> 注册 -> smoke”的标准路径，不再允许文档里出现多套做法。
+  - 把模板目录内需要修改的最小文件列清楚，例如 `plugin.go`、`manifest.json`、`README.md`、测试文件。
+  - 统一模板中的命名占位符，避免 README、manifest、测试样例各自使用不同名字。
+  - 明确模板最小能力边界，只承诺事件型入口，不把 job / schedule / command 混进模板默认路径。
+  - 把 smoke 测试步骤写成固定命令与固定预期结果，减少“跑哪些测试”不明确的问题。
+  - 确保模板 README 只保留开发者第一次上手真正需要的步骤，不把平台背景说明塞进模板入口。
+  - 增加模板自校验，至少保证 manifest 入口、导出符号、README 中的关键命名不会轻易失同步。
 
 ### B4. 插件发布 / 分发规范
 - 目标：先建立发布规范，再考虑市场。
-- 子任务方向：
-  - 插件元数据规范
-  - 版本兼容范围声明
-  - 安装来源声明
-  - 最小发布校验
+- 直接子步骤：
+  - 先确定插件发布包最小必备元数据，至少覆盖插件名、版本、入口、兼容 runtime 范围、来源信息。
+  - 明确版本号和兼容范围的写法，避免作者各自写不一致格式。
+  - 固定安装来源声明格式，区分本地路径、仓库地址、归档包等来源类型。
+  - 定义发布前最小校验清单，例如 manifest 完整、版本字段合法、兼容范围可解析、入口存在。
+  - 给出一份最小发布样例，让插件作者知道“合格发布物”长什么样。
+  - 把“发布规范”与未来“市场索引”边界分开，当前只保证发布物可校验、可识别、可安装前检查。
 
 ### B5. 插件兼容性 / 版本管理增强
 - 目标：把现在的 compatibility 边界推进到生态可用级别。
-- 子任务方向：
-  - runtime version ↔ plugin version
-  - adapter capability ↔ plugin requirement
-  - manifest compatibility error 更稳定可解释
+- 直接子步骤：
+  - 固定 runtime version 与 plugin version 的比较规则，明确哪些范围表达式被支持。
+  - 固定 adapter capability 与 plugin requirement 的对齐方式，避免 capability 名称随处散落。
+  - 把 manifest compatibility reject 的 caller-facing 错误格式收口，保证能稳定告诉调用方“缺什么、冲突什么、在哪失败”。
+  - 为常见不兼容场景补齐覆盖，例如 runtime 版本过低、adapter 能力缺失、缺少必填配置。
+  - 区分“无法加载”“可以加载但降级”“仅告警不阻断”三类兼容性结果，避免全部落成同一类失败。
+  - 把兼容性结论暴露到状态页或读面里，让 operator 能直接看到插件为什么不能启用。
 
 ### B6. RBAC 从局部边界推进到 operator action
 - 目标：把“谁能执行什么动作”收口到统一权限模型。
-- 子任务方向：
-  - plugin reload permission
-  - console action permission
-  - schedule/job action permission
-  - deny audit 继续保持统一
+- 直接子步骤：
+  - 列出当前已经存在的 operator action，并先收口到一份最小动作清单。
+  - 先把 `plugin reload`、console 写操作、schedule/job 操作接入同一套权限判定入口。
+  - 固定动作命名规则，避免 API、内部逻辑、audit 文案使用不同 action 名。
+  - 明确 deny 时的返回格式，保证调用方能看到被拒绝原因而不是模糊失败。
+  - 保持 deny audit 结构一致，至少能看到操作者、动作、目标、拒绝原因、发生时间。
+  - 为最小角色或权限样例补测试，覆盖 allow、deny、缺失权限三类场景。
+  - 确保新增 action 不绕过统一检查入口，避免局部 if 判断继续扩散。
 
 ### B7. secrets 进入主路径
 - 目标：让 secret 不只是局部配置，而是正式成为 plugin / provider / adapter 配置来源。
-- 子任务方向：
-  - secret resolution 接入 plugin config
-  - secret missing / invalid caller-facing error
-  - secret source 与使用边界可观测
+- 直接子步骤：
+  - 先定义 secret resolution 在配置装载链路中的固定入口，不让 plugin、provider、adapter 各自解析。
+  - 明确 secret 引用格式和解析失败时机，区分“引用不存在”“格式非法”“来源不可用”。
+  - 为 plugin config 接入 secret resolution，保证插件作者能使用统一方式声明敏感配置。
+  - 为 provider / adapter 配置接入同样的解析路径，避免只在某一类配置里可用。
+  - 把 missing / invalid secret 错误做成 caller-facing 信息，至少能定位到哪个字段解析失败。
+  - 补最小可观测字段，至少能看到 secret 来自哪个 source、是否解析成功，但不泄露 secret 实值。
+  - 明确日志与读面里的脱敏规则，避免错误输出把 secret 内容打出来。
 
 ### B8. 告警 / 通知最小闭环
 - 目标：让关键故障不只存在日志里。
-- 候选切片：
-  - job 持续失败告警
-  - plugin host crash 告警
-  - adapter 连接异常告警
+- 直接子步骤：
+  - 先固定 v0 告警对象范围，只做当前 backlog 已列出的关键故障，不扩展成全量告警系统。
+  - 为 `job` 持续失败定义触发条件，例如连续失败次数、失败窗口时间、是否去重。
+  - 为 `plugin host crash` 定义触发条件，区分启动失败、握手后崩溃、重复崩溃。
+  - 为 `adapter` 连接异常定义触发条件，区分短暂抖动与持续不可用。
+  - 先接一个最小通知出口，保证告警能真正发出去，而不是只在内存里记状态。
+  - 定义最小告警载荷，至少包含对象标识、故障类型、首次发生时间、最近发生时间、最近错误原因。
+  - 增加最小恢复通知或恢复状态更新，避免问题恢复后仍一直悬挂。
+  - 做最小去重策略，避免同一故障在短时间内刷屏。
 
 ### B9. replay / retry / dead-letter operator workflow
 - 目标：把失败后的人工处理路径做成平台能力。
-- 子任务方向：
-  - retry failed job
-  - inspect failure reason
-  - replay selected event / request
-  - dead-letter visibility
+- 直接子步骤：
+  - 先固定 operator 视角下的最小工作流，明确“查看失败 -> 判断原因 -> retry 或 replay -> 查看结果”的顺序。
+  - 为 failed job 提供明确的 retry 入口，并限制只对允许重试的对象开放。
+  - 在读面中补齐 failure reason、失败阶段、最近失败时间，保证 operator 能先看明白再操作。
+  - 为 selected event / request 提供 replay 入口，并明确 replay 的目标对象、触发条件和结果记录。
+  - 为 dead-letter 补最小可见性，至少能列出对象、原因、进入 dead-letter 的时间。
+  - 区分 retry 与 replay 的审计记录，避免事后无法判断是重试原任务还是重放原请求。
+  - 给 operator action 定义最小幂等保护，避免重复点击造成多次无意执行。
+  - 为这条 workflow 增加最小端到端验证，确保从查看失败到重新触发确实能闭环。
 
 ### B10. fault injection 继续贴近真实外部依赖
 - 目标：把 fault injection 从当前最小边界继续推进。
-- 子任务方向：
-  - provider failure
-  - outbound webhook/client failure
-  - plugin-host failure
-  - persistence failure
+- 直接子步骤：
+  - 先按现有 backlog 范围补四类故障注入，不扩展成通用 chaos 系统。
+  - 为 provider failure 明确可注入的失败类型，例如超时、返回错误、坏响应。
+  - 为 outbound webhook/client failure 补网络侧注入点，例如连接失败、超时、非 2xx、响应体异常。
+  - 为 plugin-host failure 补更贴近真实运行面的注入点，例如启动失败、握手失败、运行中崩溃。
+  - 为 persistence failure 补存储侧注入点，例如写失败、读失败、事务提交失败。
+  - 每类故障都要对应到当前平台已有的可观测出口，至少能在日志、状态或读面里看到影响。
+  - 把 fault injection 的开关边界控制清楚，避免默认运行路径误带注入逻辑。
+  - 为关键注入场景补测试，确保注入确实命中，而不是只有伪开关。
 
 ### B11. Postgres 可信度增强
 - 目标：保持 Postgres 作为 v0 边界，但增强真实可用性。
-- 子任务方向：
-  - migration / bootstrap 更稳定
-  - 最小读写 smoke
-  - 与 runtime 路径的真实连接验证
+- 直接子步骤：
+  - 把 migration / bootstrap 的启动路径收口，明确首次启动、重复启动、已有 schema 时的行为。
+  - 为 Postgres 增加最小读写 smoke，覆盖建连、写入、读取、关闭这条最短主链。
+  - 验证 runtime 真实路径已经走到 Postgres，而不是只在独立测试里能通。
+  - 明确连接失败、migration 失败、schema 不匹配时的报错方式，保证 operator 能定位问题。
+  - 为开发态配置和文档给出最小可运行样例，降低“配上了但不知道怎么验证”的成本。
+  - 区分“v0 可用”与“稳定主存储”表述，避免文档或状态页过度宣称。
+  - 为关键启动失败场景补验证，确保 Postgres 接错时不会静默退回别的路径。
 
 ### B12. 部署 / 运维入口增强
 - 目标：补成熟机器人项目常见的 operator 入口。
-- 子任务方向：
-  - 启动/停止/重启脚本
-  - 升级路径
-  - 备份/恢复最小流程
-  - 配置检查命令
+- 直接子步骤：
+  - 先把启动、停止、重启三类常用操作收口到固定入口，不让部署方式决定命令语义。
+  - 明确升级路径的最小步骤，至少覆盖停机前检查、升级执行、升级后验证。
+  - 给出最小备份/恢复流程，先覆盖当前已有状态与配置边界，不扩展到未来分布式形态。
+  - 增加配置检查命令，保证 operator 能在启动前发现明显配置错误。
+  - 为每个入口明确成功 / 失败返回标准，而不是只输出一串日志。
+  - 文档中给出一套最小运维路径，避免 operator 需要翻多个目录自己拼流程。
+  - 确保这些入口与实际 runtime 边界一致，不写成“看起来像完整控制面”的假能力。
 
 ### B13. runtime 健康检查细化
 - 目标：让 `/healthz` 不只是进程活着。
-- 子任务方向：
-  - storage health
-  - scheduler health
-  - plugin-host health
-  - adapter health
-  - aggregated readiness
+- 直接子步骤：
+  - 先定义 `/healthz`、readiness、聚合状态之间的职责边界，避免一个接口承担所有语义。
+  - 为 storage health 增加最小检查，确保不是只看进程内对象存在。
+  - 为 scheduler health 增加最小检查，至少能反映关键 runner 是否处于可工作状态。
+  - 为 plugin-host health 增加最小检查，区分“宿主可创建实例”和“最近实例持续失败”。
+  - 为 adapter health 增加最小检查，反映连接状态或最近连接错误。
+  - 聚合 readiness 时明确降级规则，避免某一项轻微异常直接把整体判死，或反过来全部吞掉。
+  - 固定健康返回结构，保证 operator 与 Console 读面能稳定消费。
+  - 为正常、降级、失败三类状态补测试，避免健康检查语义飘移。
 
 ### B14. 插件数据 / 状态持久化规范
 - 目标：让插件作者知道状态存哪里、如何恢复、如何暴露给 Console。
-- 子任务方向：
-  - plugin state store guideline
-  - snapshot / status model
-  - migration / compatibility expectations
+- 直接子步骤：
+  - 先定义插件状态与业务数据的最小边界，避免作者把所有内容都塞进同一存储。
+  - 给出 plugin state store guideline，明确哪些数据适合持久化、哪些只应存在运行态。
+  - 固定 snapshot / status model 的最小结构，让 Console 能稳定读取插件状态而不是猜字段。
+  - 明确插件恢复时应依赖什么状态源，避免插件各自发明恢复语义。
+  - 写清 migration / compatibility expectation，至少说明插件升级后状态结构变化该如何处理。
+  - 给出最小示例，让插件作者能照着落一条“持久化 -> 重启恢复 -> 读面展示”的路径。
+  - 保证这套规范不让插件反向依赖 runtime 内部私有实现。
 
 ### B15. 开发者体验增强
 - 目标：向 NoneBot2 这类成熟框架靠近，但只补最有价值的部分。
-- 子任务方向：
-  - 更明确的脚手架命令
-  - 本地 smoke / e2e 命令统一
-  - 模板与测试约束统一
-  - 最小发布检查命令
+- 直接子步骤：
+  - 先把脚手架命令收口到少量固定入口，减少“创建插件到底用哪种方式”的歧义。
+  - 统一本地 smoke / e2e 命令，让插件作者知道开发阶段至少该跑哪几条验证。
+  - 把模板约束、测试约束、命名约束写成能执行的检查，而不是只写在文档里。
+  - 补一个最小发布检查命令，把 manifest、测试、基础元数据检查收在一起。
+  - 把开发者首次接触仓库时最常用的命令整理成一条顺手路径，避免在根 README、模板 README、测试目录之间来回跳。
+  - 保持增强范围聚焦在“更快上手、更少踩坑”，不扩展成完整 IDE 或平台工具链。
 
 ### B16. 插件索引 / 市场前置条件
 - 目标：先做 marketplace 前置，不直接做完整市场。
-- 子任务方向：
-  - 可机器读取的插件索引格式
-  - 插件列表读面
-  - 来源可信度 / 兼容性字段
-  - 安装前检查
+- 直接子步骤：
+  - 先定义可机器读取的插件索引格式，至少能表达插件标识、版本、来源、兼容性、摘要信息。
+  - 为插件列表做最小读面，先解决“平台怎么读出可安装候选”。
+  - 把来源可信度、兼容性字段放进索引结构，避免后续列表页只能展示名字和版本。
+  - 增加安装前检查，至少能在真正安装前验证来源、兼容范围、关键元数据是否可用。
+  - 明确索引与发布规范的关系，保证索引消费的是已定义好的发布元数据，而不是另起一套字段。
+  - 保持当前只做“可索引、可列出、可预检查”，不提前扩展评论、评分、搜索运营功能。
 
 ### B17. 更完整的多 bot / 多账号编排
 - 目标：向 TRSS-Yunzai 的成熟度靠近，但不一次做满。
-- 子任务方向：
-  - bot instance registry
-  - per-instance status
-  - per-instance config
-  - per-instance restart / isolation boundary
+- 直接子步骤：
+  - 先建立 bot instance registry，保证每个 bot / 账号实例都有稳定标识与最小元数据。
+  - 为每个实例补齐状态读面，至少能看到在线状态、配置来源、最近错误、最近恢复时间。
+  - 明确 per-instance config 的装载与覆盖边界，避免多个账号共享一份模糊配置。
+  - 为 per-instance restart 提供最小操作入口，并保证不会误伤其他实例。
+  - 固定实例隔离边界，明确一个实例失败时哪些状态会受影响，哪些不会。
+  - 在 Console 或 API 中体现实例维度，而不是继续只展示 adapter 级汇总状态。
+  - 先覆盖最小多实例运行与读面闭环，不提前扩展成复杂集群调度。
 
 ### B18. 更完整的 control plane 写操作
 - 目标：从最小 operator action 逐步走向真正 control plane。
-- 子任务方向：
-  - bulk action
-  - action audit
-  - rollback / disable
-  - action-level permission
+- 直接子步骤：
+  - 先列出当前最值得暴露的写操作，避免一开始就做大而全控制面。
+  - 为 bulk action 定义最小适用范围和失败语义，明确部分成功时如何返回结果。
+  - 为每类写操作补 action audit，保证谁在什么时候对什么对象做了什么操作可追踪。
+  - 为 rollback / disable 定义最小回退路径，避免写操作一旦执行就没有安全撤回手段。
+  - 把 action-level permission 与 B6 对齐，保证控制面写操作不绕开统一权限模型。
+  - 为写操作结果定义稳定返回结构，至少能区分已执行、被拒绝、部分成功、需要人工处理。
+  - 保持当前范围聚焦在“可安全执行的最小 operator action”，不提前包装成完整产品化控制台。
 
 ---
 
