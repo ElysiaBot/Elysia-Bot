@@ -12,17 +12,6 @@
 
 ## Active
 
-### T4. Console 读面继续收口到重启后的运行事实
-- 目标：让 `GET /api/console` 在 restart 后更忠实反映 persisted / recovered state，而不是继续优先暴露内存态瞬时结果。
-- 完成标准：
-  - 至少补齐 1 类 job / schedule / plugin 状态在 `GET /api/console` 中的 persisted / recovered evidence 映射
-  - 返回结果能清楚区分 live overlay 与 persisted / recovered state，避免重启后读面失真
-  - 相关 `apps/runtime` Console API 测试与 `packages/runtime-core` 恢复语义测试通过
-
----
-
-## Next
-
 ### T5. 插件管理最小闭环
 - 目标：补一个最小可用的插件管理入口，而不是只有静态注册与模板。
 - 范围：
@@ -32,6 +21,10 @@
   - 能看见 plugin 是否启用
   - 能执行启用 / 停用 / 重载中的至少一项
   - 失败时能看到最小原因
+
+---
+
+## Next
 
 ### T6. 插件配置管理最小闭环
 - 目标：把当前 manifest / config schema 边界推进到“平台可管理”的最小状态。
