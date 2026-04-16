@@ -12,26 +12,20 @@
 
 ## Active
 
-### T1. webhook ingress 早退链路再收一刀
-- 目标：在 `adapters/adapter-webhook` 的 `unauthorized` / `invalid_payload` / `invalid_event` 相邻路径里，再补 1 个最小 observability / fidelity 缺口。
+### T2. adapter-webhook invalid_payload decode fidelity 严格收口
+- 目标：让 `adapters/adapter-webhook` 对尾随额外 JSON 与未知顶层字段都按 `invalid_payload` 拒绝，同时保持现有 payload / audit / trace 行为不回退。
 - 范围：
   - 只动 `adapters/adapter-webhook`
   - 只动受影响测试
   - 必要时只更新本文件中的状态
 - 完成标准：
-  - caller-facing `code` / `message` / `trace_id` 不回退
-  - 补齐一个明确的小缺口，而不是扩成统一 taxonomy
+  - trailing extra JSON 与 unknown top-level fields 都稳定落到 `invalid_payload`
+  - 现有 payload / audit / `trace_id` 行为不回退
   - `go test ./adapters/adapter-webhook -count=1` 通过
 
 ---
 
 ## Next
-
-### T2. 判断 webhook ingress 邻域是否已经收干净
-- 目标：确认当前 webhook early-rejection 邻域是否还存在同级别最小缺口。
-- 完成标准：
-  - 如果还有更小缺口，继续生成下一个同级切片
-  - 如果没有，正式切回 runtime 主线
 
 ### T3. Job / Scheduler / 恢复语义最小闭环增强
 - 目标：从 `packages/runtime-core` 中挑 1 个最小恢复语义缺口补齐。
