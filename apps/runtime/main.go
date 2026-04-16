@@ -422,7 +422,7 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["schedule_status_source"] = "sqlite-schedule-plans"
 	meta["schedule_status_persisted"] = true
 	meta["schedule_recovery_source"] = "runtime-startup-restore"
-	meta["schedule_recovery_reason"] = "delay/one-shot recompute dueAt when missing; invalid persisted plans are skipped"
+	meta["schedule_recovery_reason"] = "missing dueAt is recomputed and persisted during startup restore; invalid persisted plans are skipped"
 	meta["schedule_recovery_total_schedules"] = scheduleRecovery.TotalSchedules
 	meta["schedule_recovery_recovered_schedules"] = scheduleRecovery.RecoveredSchedules
 	meta["schedule_recovery_invalid_schedules"] = scheduleRecovery.InvalidSchedules

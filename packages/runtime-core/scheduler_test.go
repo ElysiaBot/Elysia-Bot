@@ -720,7 +720,7 @@ func TestSchedulerRestoreCountsRecoveredMissingDueAtAndInvalidPlans(t *testing.T
 	}
 
 	snapshot := scheduler.LastRecoverySnapshot()
-	if snapshot.TotalSchedules != 2 || snapshot.RecoveredSchedules != 0 || snapshot.InvalidSchedules != 1 {
+	if snapshot.TotalSchedules != 2 || snapshot.RecoveredSchedules != 1 || snapshot.InvalidSchedules != 1 {
 		t.Fatalf("expected recovery snapshot counts for missing dueAt and invalid persisted schedule, got %+v", snapshot)
 	}
 	if snapshot.ScheduleKinds[ScheduleKindDelay] != 1 {
@@ -729,10 +729,17 @@ func TestSchedulerRestoreCountsRecoveredMissingDueAtAndInvalidPlans(t *testing.T
 	if got := scheduler.dueAt["restore-delay-missing-dueat"]; !got.Equal(createdAt.Add(30 * time.Second)) {
 		t.Fatalf("expected missing dueAt to be recomputed, got %s", got)
 	}
+	repaired, err := store.LoadSchedulePlan(context.Background(), "restore-delay-missing-dueat")
+	if err != nil {
+		t.Fatalf("load repaired persisted schedule plan: %v", err)
+	}
+	if repaired.DueAt == nil || !repaired.DueAt.Equal(createdAt.Add(30*time.Second)) {
+		t.Fatalf("expected repaired dueAt to persist back to storage, got %+v", repaired)
+	}
 	if _, ok := scheduler.dueAt["restore-cron-invalid"]; ok {
 		t.Fatal("expected invalid persisted schedule to be skipped during restore")
 	}
-	if output := metrics.RenderPrometheus(); !strings.Contains(output, "bot_platform_schedule_recoveries_total 0") {
+	if output := metrics.RenderPrometheus(); !strings.Contains(output, "bot_platform_schedule_recoveries_total 1") {
 		t.Fatalf("expected metrics to count recovered schedules, got %s", output)
 	}
 }

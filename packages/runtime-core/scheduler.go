@@ -260,6 +260,7 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 			recovery.InvalidSchedules++
 			continue
 		}
+		missingDueAt := stored.DueAt == nil || stored.DueAt.IsZero()
 		dueAt, err := restoredScheduleDueAt(s.now, stored)
 		if err != nil {
 			recovery.InvalidSchedules++
@@ -272,6 +273,12 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 				continue
 			}
 			dueAt = &computedDueAt
+			missingDueAt = true
+		}
+		if missingDueAt {
+			if err := s.persistRestoredPlan(ctx, stored, *dueAt); err != nil {
+				return err
+			}
 			recovery.RecoveredSchedules++
 			if s.metrics != nil {
 				s.metrics.IncrementScheduleRecoveries()
@@ -296,6 +303,19 @@ func (s *Scheduler) Restore(ctx context.Context) error {
 		})
 	}
 	return nil
+}
+
+func (s *Scheduler) persistRestoredPlan(ctx context.Context, stored storedSchedulePlan, dueAt time.Time) error {
+	if s.store == nil {
+		return nil
+	}
+	repairedDueAt := dueAt
+	return s.store.SaveSchedulePlan(ctx, storedSchedulePlan{
+		Plan:      stored.Plan,
+		DueAt:     &repairedDueAt,
+		CreatedAt: stored.CreatedAt,
+		UpdatedAt: s.now(),
+	})
 }
 
 func (s *Scheduler) LastRecoverySnapshot() ScheduleRecoverySnapshot {

@@ -563,16 +563,25 @@ func TestRuntimeAppConsoleAndMetricsExposeScheduleRecoveryAfterRestart(t *testin
 	}
 	defer func() { _ = restarted.Close() }()
 
+	stored, err := restarted.state.LoadSchedulePlan(t.Context(), "schedule-recovery-missing-dueat")
+	if err != nil {
+		t.Fatalf("load repaired persisted schedule plan: %v", err)
+	}
+	wantDueAt := createdAt.Add(5 * time.Second)
+	if stored.DueAt == nil || !stored.DueAt.Equal(wantDueAt) {
+		t.Fatalf("expected restored schedule dueAt to persist as %s, got %+v", wantDueAt, stored)
+	}
+
 	consoleReq := httptest.NewRequest(http.MethodGet, "/api/console", nil)
 	consoleResp := httptest.NewRecorder()
 	restarted.ServeHTTP(consoleResp, consoleReq)
 	for _, expected := range []string{
 		`"schedule_recovery_source": "runtime-startup-restore"`,
-		`"schedule_recovery_recovered_schedules": 0`,
+		`"schedule_recovery_recovered_schedules": 1`,
 		`"schedule_recovery_total_schedules": 1`,
 		`"scheduleKinds": {`,
 		`"delay": 1`,
-		`"recoveredSchedules": 0`,
+		`"recoveredSchedules": 1`,
 		`"totalSchedules": 1`,
 	} {
 		if !strings.Contains(consoleResp.Body.String(), expected) {
@@ -583,7 +592,7 @@ func TestRuntimeAppConsoleAndMetricsExposeScheduleRecoveryAfterRestart(t *testin
 	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	metricsResp := httptest.NewRecorder()
 	restarted.ServeHTTP(metricsResp, metricsReq)
-	if !strings.Contains(metricsResp.Body.String(), "bot_platform_schedule_recoveries_total 0") {
+	if !strings.Contains(metricsResp.Body.String(), "bot_platform_schedule_recoveries_total 1") {
 		t.Fatalf("expected metrics payload to include schedule recoveries counter, got %s", metricsResp.Body.String())
 	}
 }
