@@ -12,27 +12,16 @@
 
 ## Active
 
-### T6. 插件配置管理最小闭环
-- 目标：把当前 manifest / config schema 边界推进到“平台可管理”的最小状态。
+### T7. runtime/operator 写操作最小入口
+- 目标：在只读 Console 之外，补最小 operator action。
 - 最小完成形态：
-  - 至少 1 个插件配置可被读取、校验、持久化、再次加载
-  - 错配时有 caller-facing error
-  - 不扩成完整可视化配置系统
+  - 至少 1 个动作真实可用
+  - 有基本审计或日志证据
+  - 不扩成完整 control plane
 
 ---
 
 ## Next
-
-### T7. runtime/operator 写操作最小入口
-- 目标：在只读 Console 之外，补最小 operator action。
-- 候选切片：
-  - 手动重试一个失败 job
-  - 手动取消一个 schedule
-  - 手动 reload 一个 plugin
-- 完成标准：
-  - 至少 1 个动作真实可用
-  - 有基本审计或日志证据
-  - 不扩成完整 control plane
 
 ---
 
