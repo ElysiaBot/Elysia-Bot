@@ -1,0 +1,406 @@
+package pluginadmin
+
+import (
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
+)
+
+type lifecycleRecorder struct {
+	enabled  []string
+	disabled []string
+	err      error
+}
+
+type rolloutRecorder struct {
+	prepared  []string
+	activated []string
+	checked   []string
+	err       error
+	records   map[string]pluginsdk.RolloutRecord
+	checkErr  error
+}
+
+type auditRecorder struct {
+	entries []pluginsdk.AuditEntry
+	err     error
+}
+
+type replayRecorder struct {
+	eventIDs []string
+	event    eventmodel.Event
+	err      error
+}
+
+func (r *auditRecorder) RecordAudit(entry pluginsdk.AuditEntry) error {
+	r.entries = append(r.entries, entry)
+	return r.err
+}
+
+func auditReasonValue(entry pluginsdk.AuditEntry) string {
+	value := reflect.ValueOf(entry)
+	field := value.FieldByName("Reason")
+	if field.IsValid() && field.Kind() == reflect.String {
+		return field.String()
+	}
+	return ""
+}
+
+func (r *replayRecorder) ReplayEvent(eventID string) (eventmodel.Event, error) {
+	r.eventIDs = append(r.eventIDs, eventID)
+	return r.event, r.err
+}
+
+func (r *rolloutRecorder) Prepare(pluginID string) (pluginsdk.RolloutRecord, error) {
+	r.prepared = append(r.prepared, pluginID)
+	record := pluginsdk.RolloutRecord{PluginID: pluginID, Status: pluginsdk.RolloutStatusPrepared}
+	if r.records == nil {
+		r.records = map[string]pluginsdk.RolloutRecord{}
+	}
+	r.records[pluginID] = record
+	return record, r.err
+}
+
+func (r *rolloutRecorder) Activate(pluginID string) (pluginsdk.RolloutRecord, error) {
+	r.activated = append(r.activated, pluginID)
+	record := pluginsdk.RolloutRecord{PluginID: pluginID, Status: pluginsdk.RolloutStatusActivated}
+	if r.records == nil {
+		r.records = map[string]pluginsdk.RolloutRecord{}
+	}
+	r.records[pluginID] = record
+	return record, r.err
+}
+
+func (r *rolloutRecorder) CanActivate(pluginID string) (pluginsdk.RolloutRecord, error) {
+	r.checked = append(r.checked, pluginID)
+	if r.checkErr != nil {
+		return pluginsdk.RolloutRecord{}, r.checkErr
+	}
+	if r.records == nil {
+		return pluginsdk.RolloutRecord{}, errors.New("rollout is not prepared")
+	}
+	record, ok := r.records[pluginID]
+	if !ok || record.Status != pluginsdk.RolloutStatusPrepared {
+		return pluginsdk.RolloutRecord{}, errors.New("rollout is not prepared")
+	}
+	return record, nil
+}
+
+func (r *rolloutRecorder) Record(pluginID string) (pluginsdk.RolloutRecord, bool) {
+	if r.records == nil {
+		return pluginsdk.RolloutRecord{}, false
+	}
+	record, ok := r.records[pluginID]
+	return record, ok
+}
+
+func (l *lifecycleRecorder) Enable(pluginID string) error {
+	l.enabled = append(l.enabled, pluginID)
+	return l.err
+}
+
+func (l *lifecycleRecorder) Disable(pluginID string) error {
+	l.disabled = append(l.disabled, pluginID)
+	return l.err
+}
+
+func adminPolicies() map[string]RolePolicy {
+	return map[string]RolePolicy{
+		"admin":            {Permissions: []string{"plugin:enable", "plugin:disable", "plugin:replay", "plugin:rollout"}, PluginScope: []string{"*"}},
+		"echo-operator":    {Permissions: []string{"plugin:enable"}, PluginScope: []string{"plugin-echo"}},
+		"enable-any":       {Permissions: []string{"plugin:enable"}, PluginScope: []string{}},
+		"scope-echo-only":  {Permissions: []string{}, PluginScope: []string{"plugin-echo"}},
+		"rollout-operator": {Permissions: []string{"plugin:rollout"}, PluginScope: []string{"plugin-echo"}},
+		"viewer":           {Permissions: []string{"plugin:disable"}, PluginScope: []string{"*"}},
+		"replay-operator":  {Permissions: []string{"plugin:replay"}, EventScope: []string{"evt-allowed"}},
+	}
+}
+
+func TestPluginAdminExecutesEnableDisableCommands(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &lifecycleRecorder{}
+	audit := &auditRecorder{}
+	plugin := New(lifecycle, nil, nil, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), audit)
+	plugin.CurrentTime = func() time.Time { return time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC) }
+
+	if err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "admin-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-1", EventID: "evt-1"}); err != nil {
+		t.Fatalf("enable command: %v", err)
+	}
+	if err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin disable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "admin-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-2", EventID: "evt-2"}); err != nil {
+		t.Fatalf("disable command: %v", err)
+	}
+
+	if len(lifecycle.enabled) != 1 || lifecycle.enabled[0] != "plugin-echo" {
+		t.Fatalf("unexpected enabled calls %+v", lifecycle.enabled)
+	}
+	if len(lifecycle.disabled) != 1 || lifecycle.disabled[0] != "plugin-echo" {
+		t.Fatalf("unexpected disabled calls %+v", lifecycle.disabled)
+	}
+	if len(plugin.AuditLog()) != 2 || !plugin.AuditLog()[0].Allowed || !plugin.AuditLog()[1].Allowed {
+		t.Fatalf("unexpected audit trail %+v", plugin.AuditLog())
+	}
+	if len(audit.entries) != 2 || audit.entries[0].Target != "plugin-echo" || audit.entries[0].OccurredAt != "2026-04-03T12:00:00Z" {
+		t.Fatalf("unexpected external audit entries %+v", audit.entries)
+	}
+}
+
+func TestPluginAdminRejectsUnauthorizedActorAndAudits(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, nil, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "guest-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-3", EventID: "evt-3"})
+	if err == nil {
+		t.Fatal("expected unauthorized actor to fail")
+	}
+	if len(plugin.AuditLog()) != 1 || plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected denied audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminBubblesLifecycleError(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{err: errors.New("enable failed")}, nil, nil, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "admin-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-4", EventID: "evt-4"})
+	if err == nil {
+		t.Fatal("expected lifecycle error to bubble up")
+	}
+	if len(plugin.AuditLog()) != 1 || !plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected failed audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminReturnsAuditRecorderFailure(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, nil, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), &auditRecorder{err: errors.New("audit sink unavailable")})
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "admin-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-5", EventID: "evt-5"})
+	if err == nil || !strings.Contains(err.Error(), "audit sink unavailable") {
+		t.Fatalf("expected audit recorder failure, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || !plugin.AuditLog()[0].Allowed {
+		t.Fatalf("expected local audit record to remain available, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminDoesNotCombinePermissionAndScopeAcrossRoles(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, nil, map[string][]string{"split-user": {"enable-any", "scope-echo-only"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "split-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-8", EventID: "evt-8"})
+	if err == nil || !strings.Contains(err.Error(), "plugin scope denied") {
+		t.Fatalf("expected split-role authorization to be rejected, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected denied split-role audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminRejectsKnownActorWithoutRequiredPermission(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, nil, map[string][]string{"viewer-user": {"viewer"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin enable plugin-echo", Metadata: map[string]any{"actor": "viewer-user"}}, eventmodel.ExecutionContext{TraceID: "trace-14", EventID: "evt-14"})
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected known actor without permission to be denied, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected denied wrong-permission audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminRejectsOutOfScopePluginAndAuditsPermission(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, nil, map[string][]string{"echo-user": {"echo-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-ai-chat",
+		Metadata: map[string]any{
+			"actor": "echo-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-6", EventID: "evt-6"})
+	if err == nil || !strings.Contains(err.Error(), "plugin scope denied") {
+		t.Fatalf("expected scope denial, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected denied scoped audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminAllowsScopedRoleForConfiguredPlugin(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &lifecycleRecorder{}
+	plugin := New(lifecycle, nil, nil, map[string][]string{"echo-user": {"echo-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor": "echo-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-7", EventID: "evt-7"})
+	if err != nil {
+		t.Fatalf("expected scoped enable to pass, got %v", err)
+	}
+	if len(lifecycle.enabled) != 1 || lifecycle.enabled[0] != "plugin-echo" {
+		t.Fatalf("unexpected enable calls %+v", lifecycle.enabled)
+	}
+	if len(plugin.AuditLog()) != 1 || !plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:enable" {
+		t.Fatalf("expected allowed scoped audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminPreparesAndActivatesRolloutWithinScope(t *testing.T) {
+	t.Parallel()
+
+	lifecycle := &lifecycleRecorder{}
+	rollouts := &rolloutRecorder{}
+	plugin := New(lifecycle, rollouts, nil, map[string][]string{"rollout-user": {"rollout-operator"}}, adminPolicies(), nil)
+	plugin.CurrentTime = func() time.Time { return time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC) }
+	if err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin prepare plugin-echo", Metadata: map[string]any{"actor": "rollout-user"}}, eventmodel.ExecutionContext{TraceID: "trace-11", EventID: "evt-11"}); err != nil {
+		t.Fatalf("prepare rollout: %v", err)
+	}
+	if err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin activate plugin-echo", Metadata: map[string]any{"actor": "rollout-user"}}, eventmodel.ExecutionContext{TraceID: "trace-12", EventID: "evt-12"}); err != nil {
+		t.Fatalf("activate rollout: %v", err)
+	}
+	if len(rollouts.prepared) != 1 || rollouts.prepared[0] != "plugin-echo" || len(rollouts.activated) != 1 || rollouts.activated[0] != "plugin-echo" {
+		t.Fatalf("unexpected rollout calls prepared=%+v activated=%+v", rollouts.prepared, rollouts.activated)
+	}
+	if len(rollouts.checked) != 1 || rollouts.checked[0] != "plugin-echo" {
+		t.Fatalf("expected activate to delegate readiness check to rollout manager, got %+v", rollouts.checked)
+	}
+	if len(lifecycle.enabled) != 1 || lifecycle.enabled[0] != "plugin-echo" {
+		t.Fatalf("expected activate to trigger lifecycle enable, got %+v", lifecycle.enabled)
+	}
+	audit := plugin.AuditLog()
+	if len(audit) != 2 {
+		t.Fatalf("expected two audit entries, got %+v", audit)
+	}
+	if reason := auditReasonValue(audit[0]); reason != "rollout_prepared" {
+		t.Fatalf("expected prepare success audit reason rollout_prepared, got %+v", audit)
+	}
+	if reason := auditReasonValue(audit[1]); reason != "rollout_activated" {
+		t.Fatalf("expected activate success audit reason rollout_activated, got %+v", audit)
+	}
+}
+
+func TestPluginAdminRejectsActivateWhenRolloutIsNotPrepared(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, &rolloutRecorder{}, nil, map[string][]string{"rollout-user": {"rollout-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin activate plugin-echo", Metadata: map[string]any{"actor": "rollout-user"}}, eventmodel.ExecutionContext{TraceID: "trace-13", EventID: "evt-13"})
+	if err == nil || !strings.Contains(err.Error(), "rollout is not prepared") {
+		t.Fatalf("expected activate without prepare to fail, got %v", err)
+	}
+}
+
+func TestPluginAdminBubblesRolloutManagerActivationCheckError(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, &rolloutRecorder{checkErr: errors.New("rollout record for \"plugin-echo\" drifted after prepare: apiVersion mismatch: current=v0 candidate=v9")}, nil, map[string][]string{"rollout-user": {"rollout-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin activate plugin-echo", Metadata: map[string]any{"actor": "rollout-user"}}, eventmodel.ExecutionContext{TraceID: "trace-19", EventID: "evt-19"})
+	if err == nil || !strings.Contains(err.Error(), "drifted after prepare") {
+		t.Fatalf("expected rollout manager activation-check error to bubble, got %v", err)
+	}
+}
+
+func TestPluginAdminReplaysEventWithinScope(t *testing.T) {
+	t.Parallel()
+
+	replay := &replayRecorder{event: eventmodel.Event{EventID: "replay-evt-allowed-1"}}
+	plugin := New(&lifecycleRecorder{}, nil, replay, map[string][]string{"replay-user": {"replay-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin replay evt-allowed", Metadata: map[string]any{"actor": "replay-user"}}, eventmodel.ExecutionContext{TraceID: "trace-15", EventID: "evt-15"})
+	if err != nil {
+		t.Fatalf("expected replay command to pass, got %v", err)
+	}
+	if len(replay.eventIDs) != 1 || replay.eventIDs[0] != "evt-allowed" {
+		t.Fatalf("unexpected replay calls %+v", replay.eventIDs)
+	}
+	if len(plugin.AuditLog()) != 1 || !plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:replay" || auditReasonValue(plugin.AuditLog()[0]) != "" {
+		t.Fatalf("expected allowed replay audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminRejectsReplayOutsideScope(t *testing.T) {
+	t.Parallel()
+
+	plugin := New(&lifecycleRecorder{}, nil, &replayRecorder{}, map[string][]string{"replay-user": {"replay-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin replay evt-denied", Metadata: map[string]any{"actor": "replay-user"}}, eventmodel.ExecutionContext{TraceID: "trace-16", EventID: "evt-16"})
+	if err == nil || !strings.Contains(err.Error(), "plugin scope denied") {
+		t.Fatalf("expected replay scope denial, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || auditReasonValue(plugin.AuditLog()[0]) != "scope_denied" {
+		t.Fatalf("expected replay scope denial audit reason, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminBubblesReplayErrorAfterAuthorization(t *testing.T) {
+	t.Parallel()
+
+	replay := &replayRecorder{err: errors.New("cannot replay a replayed event")}
+	plugin := New(&lifecycleRecorder{}, nil, replay, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Raw: "/admin replay evt-replayed", Metadata: map[string]any{"actor": "admin-user"}}, eventmodel.ExecutionContext{TraceID: "trace-17", EventID: "evt-17"})
+	if err == nil || !strings.Contains(err.Error(), "cannot replay a replayed event") {
+		t.Fatalf("expected replay error to bubble, got %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || !plugin.AuditLog()[0].Allowed || plugin.AuditLog()[0].Permission != "plugin:replay" || auditReasonValue(plugin.AuditLog()[0]) != "replay_rejected" {
+		t.Fatalf("expected authorized replay audit record, got %+v", plugin.AuditLog())
+	}
+}
+
+func TestPluginAdminSupportsStructuredArgumentsForReplayCommand(t *testing.T) {
+	t.Parallel()
+
+	replay := &replayRecorder{event: eventmodel.Event{EventID: "replay-evt-allowed-2"}}
+	plugin := New(&lifecycleRecorder{}, nil, replay, map[string][]string{"replay-user": {"replay-operator"}}, adminPolicies(), nil)
+	err := plugin.OnCommand(eventmodel.CommandInvocation{Name: "admin", Arguments: []string{"replay", "evt-allowed"}, Metadata: map[string]any{"actor": "replay-user"}}, eventmodel.ExecutionContext{TraceID: "trace-18", EventID: "evt-18"})
+	if err != nil {
+		t.Fatalf("expected structured replay command to pass, got %v", err)
+	}
+	if len(replay.eventIDs) != 1 || replay.eventIDs[0] != "evt-allowed" {
+		t.Fatalf("unexpected replay calls %+v", replay.eventIDs)
+	}
+}

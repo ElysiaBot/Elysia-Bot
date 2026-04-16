@@ -1,0 +1,27 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local OpenCode / Golutra workspace state
+.golutra/
+
+# Node / frontend build artifacts
+node_modules/
+apps/console-web/node_modules/
+apps/console-web/dist/
+*.tsbuildinfo
+apps/console-web/vite.config.js
+apps/console-web/vite.config.d.ts
+
+# Runtime local state
+data/
+
+# Environment / local secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log

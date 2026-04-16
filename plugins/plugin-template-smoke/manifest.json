@@ -1,0 +1,22 @@
+{
+  "id": "plugin-template-smoke",
+  "name": "Plugin Template Smoke",
+  "version": "0.1.0",
+  "apiVersion": "v0",
+  "mode": "subprocess",
+  "permissions": [
+    "reply:send"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "prefix": {
+        "type": "string"
+      }
+    }
+  },
+  "entry": {
+    "module": "plugins/plugin-template-smoke",
+    "symbol": "Plugin"
+  }
+}

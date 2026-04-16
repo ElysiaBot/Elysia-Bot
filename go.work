@@ -1,0 +1,18 @@
+go 1.25.0
+
+use (
+	./adapters/adapter-onebot
+	./adapters/adapter-webhook
+	./apps/runtime
+	./packages/event-model
+	./packages/plugin-sdk
+	./packages/runtime-core
+	./plugins/plugin-admin
+	./plugins/plugin-ai-chat
+	./plugins/plugin-echo
+	./plugins/plugin-scheduler
+	./plugins/plugin-template-smoke
+	./plugins/plugin-workflow-demo
+	./tests/e2e
+	./tests/fault-injection
+)

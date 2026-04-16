@@ -1,0 +1,1854 @@
+package runtimecore
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
+)
+
+type staticRecoverySource struct {
+	snapshot RecoverySnapshot
+}
+
+func (s staticRecoverySource) LastRecoverySnapshot() RecoverySnapshot {
+	return s.snapshot
+}
+
+func TestConsoleAPIExposesReadOnlySystemState(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	queue := NewJobQueue()
+	audits := NewInMemoryAuditLog()
+	config := Config{Runtime: RuntimeConfig{Environment: "development", LogLevel: "debug", HTTPPort: 8080}}
+	logs := []string{"runtime started", "plugin-echo ready"}
+
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-echo",
+			Name:       "Echo Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-echo", Kind: "event", Success: false, Error: "subprocess host dispatch failed: timeout"})
+	if err := queue.Enqueue(context.TODO(), NewJob("job-console", "ai.call", 1, 30*time.Second)); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	if err := audits.RecordAudit(pluginsdk.AuditEntry{
+		Actor:      "admin-user",
+		Action:     "enable",
+		Target:     "plugin-echo",
+		Allowed:    true,
+		OccurredAt: "2026-04-03T12:00:00Z",
+	}); err != nil {
+		t.Fatalf("record audit: %v", err)
+	}
+
+	api := NewConsoleAPI(runtime, queue, config, logs, audits)
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	plugins := api.Plugins()
+	if len(plugins) != 1 || len(jobs) != 1 {
+		t.Fatalf("unexpected console lists: plugins=%d jobs=%d", len(api.Plugins()), len(jobs))
+	}
+	if plugins[0].LastDispatchSuccess == nil || *plugins[0].LastDispatchSuccess || plugins[0].LastDispatchError == "" {
+		t.Fatalf("expected plugin runtime state projection, got %+v", plugins)
+	}
+	if plugins[0].StatusSource != "runtime-registry+runtime-dispatch-results" || plugins[0].StatusEvidence != "runtime-dispatch-result" || !plugins[0].RuntimeStateLive || plugins[0].StatusPersisted {
+		t.Fatalf("expected plugin status source/evidence metadata, got %+v", plugins[0])
+	}
+	if plugins[0].StatusLevel != "error" || plugins[0].StatusRecovery != "last-dispatch-failed" || plugins[0].StatusStaleness != "process-local-volatile" {
+		t.Fatalf("expected plugin recovery/staleness metadata, got %+v", plugins[0])
+	}
+	if plugins[0].CurrentFailureStreak != 1 || plugins[0].LastRecoveredAt != nil || plugins[0].LastRecoveryFailureCount != 0 {
+		t.Fatalf("expected failure streak facts without synthetic recovery facts, got %+v", plugins[0])
+	}
+	if plugins[0].LastDispatchKind != "event" {
+		t.Fatalf("expected plugin last dispatch kind, got %+v", plugins[0])
+	}
+	if plugins[0].LastDispatchAt == nil {
+		t.Fatalf("expected plugin last dispatch timestamp, got %+v", plugins[0])
+	}
+	if !strings.Contains(plugins[0].StatusSummary, "last runtime event dispatch failed via runtime-registry+runtime-dispatch-results") || !strings.Contains(plugins[0].StatusSummary, "recovery=last-dispatch-failed") || !strings.Contains(plugins[0].StatusSummary, "evidence=process-local-volatile") || !strings.Contains(plugins[0].StatusSummary, "current_failure_streak=1") {
+		t.Fatalf("expected plugin status summary to describe runtime evidence, got %q", plugins[0].StatusSummary)
+	}
+	if len(api.Audits()) != 1 || api.Audits()[0].Actor != "admin-user" {
+		t.Fatalf("expected console audits to expose audit trail, got %+v", api.Audits())
+	}
+	if len(api.Logs("plugin-echo")) != 1 {
+		t.Fatalf("expected log query to filter logs, got %+v", api.Logs("plugin-echo"))
+	}
+	filteredJobs, err := api.FilteredJobs("ai.call")
+	if err != nil {
+		t.Fatalf("filtered jobs: %v", err)
+	}
+	if len(filteredJobs) != 1 {
+		t.Fatalf("expected job query to filter jobs, got %+v", filteredJobs)
+	}
+	if jobs[0].DispatchRBAC != nil {
+		t.Fatalf("expected plain queued job without dispatch metadata to omit RBAC declaration, got %+v", jobs[0].DispatchRBAC)
+	}
+	status, err := api.Status()
+	if err != nil {
+		t.Fatalf("console status: %v", err)
+	}
+	if status.Plugins != 1 || status.Jobs != 1 {
+		t.Fatalf("unexpected runtime status %+v", status)
+	}
+
+	rendered, err := api.RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	for _, expected := range []string{"plugin-echo", "job-console", "runtime started", "development", "admin-user", "enable", `"statusSource": "runtime-registry+runtime-dispatch-results"`, `"statusEvidence": "runtime-dispatch-result"`, `"runtimeStateLive": true`, `"statusPersisted": false`, `"statusLevel": "error"`, `"statusRecovery": "last-dispatch-failed"`, `"statusStaleness": "process-local-volatile"`, `"lastDispatchKind": "event"`, `"lastDispatchSuccess": false`, `"lastDispatchError": "subprocess host dispatch failed: timeout"`, `"lastDispatchAt":`, `"currentFailureStreak": 1`} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected console output to contain %q, got %s", expected, rendered)
+		}
+	}
+}
+
+func TestConsoleJobRBACDeclarationReflectsMetadataPermissionAndTargetFilter(t *testing.T) {
+	t.Parallel()
+
+	job := NewJob("job-rbac", "ai.call", 1, 30*time.Second)
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"actor":            "console-operator",
+			"permission":       "plugin:invoke",
+			"target_plugin_id": "plugin-ai-chat",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group:42",
+		},
+	}
+
+	consoleJob := toConsoleJob(job)
+	if consoleJob.DispatchRBAC == nil {
+		t.Fatalf("expected queued job RBAC declaration, got nil")
+	}
+	if consoleJob.DispatchRBAC.Actor != "console-operator" || consoleJob.DispatchRBAC.Permission != "plugin:invoke" || consoleJob.DispatchRBAC.TargetPluginID != "plugin-ai-chat" {
+		t.Fatalf("expected actor/permission/target_plugin_id in RBAC declaration, got %+v", consoleJob.DispatchRBAC)
+	}
+	if !consoleJob.DispatchRBAC.RuntimeAuthorizerEnabled || consoleJob.DispatchRBAC.RuntimeAuthorizerScope != "metadata.permission -> plugin target via shared authorizer" {
+		t.Fatalf("expected runtime authorizer declaration for metadata.permission, got %+v", consoleJob.DispatchRBAC)
+	}
+	if !consoleJob.DispatchRBAC.ManifestGateEnabled || consoleJob.DispatchRBAC.ManifestGateScope != "job handler manifest Permissions must include declared permission" {
+		t.Fatalf("expected manifest gate declaration for metadata.permission, got %+v", consoleJob.DispatchRBAC)
+	}
+	if !consoleJob.DispatchRBAC.JobTargetFilterEnabled {
+		t.Fatalf("expected target_plugin_id to be declared as job target filter, got %+v", consoleJob.DispatchRBAC)
+	}
+	if len(consoleJob.DispatchRBAC.Facts) != 3 {
+		t.Fatalf("expected three RBAC facts, got %+v", consoleJob.DispatchRBAC.Facts)
+	}
+	for _, expected := range []string{
+		"runtime authorizer applies only when dispatch metadata.permission is set",
+		"manifest permission gate applies only when a required permission is declared",
+		"target_plugin_id narrows job dispatch to one plugin and is not a new RBAC target kind",
+	} {
+		if !containsString(consoleJob.DispatchRBAC.Facts, expected) {
+			t.Fatalf("expected RBAC facts to contain %q, got %+v", expected, consoleJob.DispatchRBAC.Facts)
+		}
+	}
+	if !strings.Contains(consoleJob.DispatchRBAC.Summary, "permission=plugin:invoke enables runtime authorizer + manifest permission gate") || !strings.Contains(consoleJob.DispatchRBAC.Summary, "target_plugin_id=plugin-ai-chat limits dispatch routing only") {
+		t.Fatalf("expected RBAC summary to explain current boundaries, got %q", consoleJob.DispatchRBAC.Summary)
+	}
+}
+
+func TestConsoleJobRBACDeclarationMarksActorOnlyMetadataAsNonEnforcing(t *testing.T) {
+	t.Parallel()
+
+	job := NewJob("job-rbac-actor-only", "ai.call", 1, 30*time.Second)
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"actor": "console-operator",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group:42",
+		},
+	}
+
+	consoleJob := toConsoleJob(job)
+	if consoleJob.DispatchRBAC == nil {
+		t.Fatalf("expected actor-only job to still declare visible authorization metadata, got nil")
+	}
+	if consoleJob.DispatchRBAC.RuntimeAuthorizerEnabled || consoleJob.DispatchRBAC.ManifestGateEnabled || consoleJob.DispatchRBAC.JobTargetFilterEnabled {
+		t.Fatalf("expected actor-only metadata not to claim enforcement gates, got %+v", consoleJob.DispatchRBAC)
+	}
+	if len(consoleJob.DispatchRBAC.Facts) != 1 || consoleJob.DispatchRBAC.Facts[0] != "actor is visible in dispatch metadata but does not trigger runtime authorization without permission" {
+		t.Fatalf("expected actor-only fact, got %+v", consoleJob.DispatchRBAC.Facts)
+	}
+	if !strings.Contains(consoleJob.DispatchRBAC.Summary, "has no permission; runtime authorizer and manifest permission gate are inactive") {
+		t.Fatalf("expected actor-only summary to explain inactive gates, got %q", consoleJob.DispatchRBAC.Summary)
+	}
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestConsoleAPIPluginStatusFallsBackToManifestOnlyEvidence(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-admin",
+			Name:       "Admin Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Binary: "plugins/plugin-admin/bin/plugin-admin"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	plugins := NewConsoleAPI(runtime, nil, Config{}, nil, nil).Plugins()
+	if len(plugins) != 1 {
+		t.Fatalf("expected one plugin, got %d", len(plugins))
+	}
+	plugin := plugins[0]
+	if plugin.StatusSource != "runtime-registry" || plugin.StatusEvidence != "manifest-only" || plugin.RuntimeStateLive || plugin.StatusPersisted {
+		t.Fatalf("expected manifest-only plugin status evidence, got %+v", plugin)
+	}
+	if plugin.StatusLevel != "registered" || plugin.StatusRecovery != "no-runtime-evidence" || plugin.StatusStaleness != "static-registration" {
+		t.Fatalf("expected manifest-only plugin recovery/staleness, got %+v", plugin)
+	}
+	if !strings.Contains(plugin.StatusSummary, "manifest registered via runtime-registry; no runtime dispatch evidence yet; status is static registration only") {
+		t.Fatalf("expected manifest-only status summary, got %q", plugin.StatusSummary)
+	}
+}
+
+func TestConsoleAPIPluginStatusClassifiesInstanceConfigRejectBeforeLaunch(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-instance-config-reject",
+			Name:       "Instance Config Reject Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-instance-config-reject"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	runtime.recordDispatch(DispatchResult{
+		PluginID: "plugin-instance-config-reject",
+		Kind:     "event",
+		Success:  false,
+		Error:    `plugin host dispatch "plugin-instance-config-reject": plugin "plugin-instance-config-reject" instance config required property "prefix" must be provided`,
+	})
+
+	plugin := NewConsoleAPI(runtime, nil, Config{}, nil, nil).Plugins()[0]
+	if plugin.StatusEvidence != "runtime-dispatch-result:instance-config-reject" {
+		t.Fatalf("expected instance-config rejection evidence, got %+v", plugin)
+	}
+	if plugin.StatusLevel != "error" || plugin.StatusRecovery != "last-dispatch-failed" || plugin.StatusStaleness != "process-local-volatile" {
+		t.Fatalf("expected rejected plugin failure metadata, got %+v", plugin)
+	}
+	if !strings.Contains(plugin.StatusSummary, "rejected before subprocess launch") || !strings.Contains(plugin.StatusSummary, "stage=instance-config") {
+		t.Fatalf("expected status summary to classify prelaunch instance-config rejection, got %q", plugin.StatusSummary)
+	}
+}
+
+func TestConsoleAPIPluginStatusMarksRecoveredAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-recover",
+			Name:       "Recover Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-recover"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	failureAt := time.Date(2026, 4, 15, 7, 0, 0, 0, time.UTC)
+	recoveredAt := failureAt.Add(3 * time.Minute)
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-recover", Kind: "event", Success: false, Error: "first failure", At: failureAt})
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-recover", Kind: "event", Success: true, At: recoveredAt})
+
+	plugin := NewConsoleAPI(runtime, nil, Config{}, nil, nil).Plugins()[0]
+	if plugin.StatusLevel != "ok" || plugin.StatusRecovery != "recovered-after-failure" || plugin.StatusStaleness != "process-local-volatile" {
+		t.Fatalf("expected recovered-after-failure plugin metadata, got %+v", plugin)
+	}
+	if plugin.LastRecoveredAt == nil || !plugin.LastRecoveredAt.Equal(recoveredAt) || plugin.LastRecoveryFailureCount != 1 || plugin.CurrentFailureStreak != 0 {
+		t.Fatalf("expected recovered plugin recovery facts, got %+v", plugin)
+	}
+	if !strings.Contains(plugin.StatusSummary, "recovery=recovered-after-failure") || !strings.Contains(plugin.StatusSummary, "last_recovered_at=2026-04-15T07:03:00Z") || !strings.Contains(plugin.StatusSummary, "last_recovery_failure_count=1") {
+		t.Fatalf("expected status summary to mention recovery facts, got %q", plugin.StatusSummary)
+	}
+}
+
+func TestConsoleAPIPluginStatusDoesNotInventRecoveryFactsForAlwaysSuccessfulHistory(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-stable",
+			Name:       "Stable Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-stable"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-stable", Kind: "event", Success: true, At: time.Date(2026, 4, 15, 7, 30, 0, 0, time.UTC)})
+
+	plugin := NewConsoleAPI(runtime, nil, Config{}, nil, nil).Plugins()[0]
+	if plugin.StatusRecovery != "last-dispatch-succeeded" || plugin.LastRecoveredAt != nil || plugin.LastRecoveryFailureCount != 0 || plugin.CurrentFailureStreak != 0 {
+		t.Fatalf("expected stable plugin not to invent recovery facts, got %+v", plugin)
+	}
+	if strings.Contains(plugin.StatusSummary, "last_recovered_at=") || strings.Contains(plugin.StatusSummary, "last_recovery_failure_count=") || strings.Contains(plugin.StatusSummary, "current_failure_streak=") {
+		t.Fatalf("expected stable plugin summary to omit synthetic recovery facts, got %q", plugin.StatusSummary)
+	}
+}
+
+func TestConsoleAPIPluginStatusUsesPersistedSnapshotWhenNoLiveDispatchExists(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-persisted",
+			Name:       "Persisted Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-persisted"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	failureAt := time.Date(2026, 4, 15, 9, 0, 0, 0, time.UTC)
+	recoveredAt := failureAt.Add(2 * time.Minute)
+	if err := store.SavePluginStatusSnapshot(context.Background(), DispatchResult{PluginID: "plugin-persisted", Kind: "event", Success: false, Error: "timeout", At: failureAt}); err != nil {
+		t.Fatalf("save failed plugin snapshot: %v", err)
+	}
+	if err := store.SavePluginStatusSnapshot(context.Background(), DispatchResult{PluginID: "plugin-persisted", Kind: "event", Success: true, At: recoveredAt}); err != nil {
+		t.Fatalf("save recovered plugin snapshot: %v", err)
+	}
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	api.SetPluginSnapshotReader(NewSQLiteConsolePluginSnapshotReader(store))
+
+	plugin := api.Plugins()[0]
+	if plugin.StatusSource != "runtime-registry+sqlite-plugin-status-snapshot" || plugin.StatusEvidence != "persisted-plugin-status-snapshot" || plugin.RuntimeStateLive || !plugin.StatusPersisted {
+		t.Fatalf("expected persisted-only plugin status evidence, got %+v", plugin)
+	}
+	if plugin.StatusRecovery != "recovered-after-failure" || plugin.StatusStaleness != "persisted-snapshot" {
+		t.Fatalf("expected persisted plugin recovery/staleness metadata, got %+v", plugin)
+	}
+	if plugin.LastDispatchAt == nil || !plugin.LastDispatchAt.Equal(recoveredAt) || plugin.LastRecoveredAt == nil || !plugin.LastRecoveredAt.Equal(recoveredAt) || plugin.LastRecoveryFailureCount != 1 || plugin.CurrentFailureStreak != 0 {
+		t.Fatalf("expected persisted plugin recovery facts, got %+v", plugin)
+	}
+}
+
+func TestConsoleAPIPluginStatusLiveOverlayWinsOverPersistedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-overlay",
+			Name:       "Overlay Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-overlay"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	persistedFailureAt := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	liveRecoveredAt := persistedFailureAt.Add(5 * time.Minute)
+	if err := store.SavePluginStatusSnapshot(context.Background(), DispatchResult{PluginID: "plugin-overlay", Kind: "event", Success: false, Error: "persisted failure", At: persistedFailureAt}); err != nil {
+		t.Fatalf("save persisted plugin snapshot: %v", err)
+	}
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-overlay", Kind: "event", Success: true, At: liveRecoveredAt})
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	api.SetPluginSnapshotReader(NewSQLiteConsolePluginSnapshotReader(store))
+
+	plugin := api.Plugins()[0]
+	if plugin.StatusSource != "runtime-registry+sqlite-plugin-status-snapshot+runtime-dispatch-results" || plugin.StatusEvidence != "live-dispatch-overlay+persisted-plugin-status-snapshot" || !plugin.RuntimeStateLive || !plugin.StatusPersisted {
+		t.Fatalf("expected live overlay to win over persisted snapshot, got %+v", plugin)
+	}
+	if plugin.StatusRecovery != "recovered-after-failure" || plugin.StatusStaleness != "persisted-snapshot+live-overlay" {
+		t.Fatalf("expected overlay recovery/staleness metadata, got %+v", plugin)
+	}
+	if plugin.LastDispatchAt == nil || !plugin.LastDispatchAt.Equal(liveRecoveredAt) || plugin.LastRecoveredAt == nil || !plugin.LastRecoveredAt.Equal(liveRecoveredAt) || plugin.LastRecoveryFailureCount != 1 || plugin.CurrentFailureStreak != 0 {
+		t.Fatalf("expected live overlay recovery facts, got %+v", plugin)
+	}
+}
+
+func TestConsoleAPIRecoveryIncludesScheduleRestoreFields(t *testing.T) {
+	t.Parallel()
+
+	recoveredAt := time.Date(2026, 4, 10, 7, 0, 0, 0, time.UTC)
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetRecoverySource(staticRecoverySource{snapshot: RecoverySnapshot{
+		RecoveredAt:        recoveredAt,
+		TotalJobs:          2,
+		RecoveredJobs:      1,
+		RecoveredRunning:   1,
+		RetriedJobs:        1,
+		DeadJobs:           0,
+		StatusCounts:       map[JobStatus]int{JobStatusRetrying: 1, JobStatusPending: 1},
+		TotalSchedules:     3,
+		RecoveredSchedules: 1,
+		InvalidSchedules:   1,
+		ScheduleKinds:      map[ScheduleKind]int{ScheduleKindDelay: 2, ScheduleKindCron: 1},
+	}})
+
+	recovery := api.Recovery()
+	if recovery.TotalSchedules != 3 || recovery.RecoveredSchedules != 1 || recovery.InvalidSchedules != 1 {
+		t.Fatalf("expected schedule recovery fields in console recovery, got %+v", recovery)
+	}
+	if recovery.ScheduleKinds["delay"] != 2 || recovery.ScheduleKinds["cron"] != 1 {
+		t.Fatalf("expected schedule kinds in console recovery, got %+v", recovery.ScheduleKinds)
+	}
+	if !strings.Contains(recovery.Summary, "jobs_restored=2") || !strings.Contains(recovery.Summary, "schedules_restored=3") || !strings.Contains(recovery.Summary, "schedules_recovered=1") || !strings.Contains(recovery.Summary, "schedules_invalid=1") {
+		t.Fatalf("expected recovery summary to include schedule restore details, got %q", recovery.Summary)
+	}
+}
+
+func TestConsoleAPIServesReadOnlyJSONOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	queue := NewJobQueue()
+	api := NewConsoleAPI(runtime, queue, Config{Runtime: RuntimeConfig{Environment: "development", HTTPPort: 8080}}, []string{"runtime started"}, nil)
+	api.SetMeta(map[string]any{"replay_policy": ReplayPolicy(), "replay_namespace": ReplayPolicy().Namespace, "secrets_policy": SecretPolicy(), "secrets_provider": SecretPolicy().Provider, "rollout_policy": RolloutPolicy(), "rollout_record_store": RolloutPolicy().RecordStore})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("expected json content type, got %q", contentType)
+	}
+	for _, expected := range []string{"status", "plugins", "jobs", "logs", "config"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("expected console http payload to contain %q, got %s", expected, recorder.Body.String())
+		}
+	}
+	if !strings.Contains(recorder.Body.String(), `"replay_policy"`) || !strings.Contains(recorder.Body.String(), `"runtime.replay.isolated"`) {
+		t.Fatalf("expected console http payload to expose replay policy declaration, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"secrets_policy"`) || !strings.Contains(recorder.Body.String(), `"secrets_provider": "env"`) || !strings.Contains(recorder.Body.String(), `"BOT_PLATFORM_"`) {
+		t.Fatalf("expected console http payload to expose secrets policy declaration, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"rollout_policy"`) || !strings.Contains(recorder.Body.String(), `"rollout_record_store": "in-memory-per-runtime-process"`) || !strings.Contains(recorder.Body.String(), `"/admin prepare \u003cplugin-id\u003e"`) {
+		t.Fatalf("expected console http payload to expose rollout policy declaration, got %s", recorder.Body.String())
+	}
+}
+
+func TestConsoleAPIServesReadOnlyJSONWhenConsoleReadAuthorizerAllows(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{RBAC: &RBACConfig{
+		ConsoleReadPermission: "console:read",
+		ActorRoles:            map[string][]string{"viewer-user": {"console-viewer"}},
+		Policies: map[string]pluginsdk.AuthorizationPolicy{
+			"console-viewer": {
+				Permissions: []string{"console:read"},
+				PluginScope: []string{"console"},
+			},
+		},
+	}}, []string{"runtime started"}, audits)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request.Header.Set(ConsoleReadActorHeader, "viewer-user")
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "runtime started") {
+		t.Fatalf("expected allowed console read response body, got %s", recorder.Body.String())
+	}
+	if len(audits.AuditEntries()) != 0 {
+		t.Fatalf("expected allowed console read not to record deny audit, got %+v", audits.AuditEntries())
+	}
+}
+
+func TestConsoleAPIDoesNotRecordDenyAuditWhenConsoleReadPermissionIsUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{}, []string{"runtime started"}, audits)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if len(audits.AuditEntries()) != 0 {
+		t.Fatalf("expected unconfigured console read compatibility path not to record deny audit, got %+v", audits.AuditEntries())
+	}
+}
+
+func TestConsoleAPIReturnsForbiddenWhenConsoleReadAuthorizerDenies(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{RBAC: &RBACConfig{
+		ConsoleReadPermission: "console:read",
+		ActorRoles:            map[string][]string{"viewer-user": {"console-viewer"}},
+		Policies: map[string]pluginsdk.AuthorizationPolicy{
+			"console-viewer": {
+				Permissions: []string{"console:read"},
+				PluginScope: []string{"console"},
+			},
+		},
+	}}, []string{"runtime started"}, audits)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "permission denied") {
+		t.Fatalf("expected forbidden response to mention permission denied, got %s", recorder.Body.String())
+	}
+	entries := audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one deny audit entry, got %+v", entries)
+	}
+	if entries[0].Action != "console.read" || entries[0].Permission != "console:read" || entries[0].Target != "console" || entries[0].Allowed || auditEntryReason(entries[0]) != "permission_denied" {
+		t.Fatalf("expected denied console read audit entry, got %+v", entries[0])
+	}
+	if entries[0].Actor != "" {
+		t.Fatalf("expected denied audit entry to preserve missing actor header as empty, got %+v", entries[0])
+	}
+}
+
+func TestConsoleAPIReturnsScopeDeniedAuditReasonWhenConsoleReadScopeRejects(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{RBAC: &RBACConfig{
+		ConsoleReadPermission: "console:read",
+		ActorRoles:            map[string][]string{"scoped-user": {"console-reader"}},
+		Policies: map[string]pluginsdk.AuthorizationPolicy{
+			"console-reader": {
+				Permissions: []string{"console:read"},
+				PluginScope: []string{"plugin-echo"},
+			},
+		},
+	}}, []string{"runtime started"}, audits)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request.Header.Set(ConsoleReadActorHeader, "scoped-user")
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "plugin scope denied") {
+		t.Fatalf("expected forbidden response to mention plugin scope denied, got %s", recorder.Body.String())
+	}
+	entries := audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one deny audit entry, got %+v", entries)
+	}
+	if entries[0].Actor != "scoped-user" || entries[0].Action != "console.read" || entries[0].Permission != "console:read" || entries[0].Target != "console" || entries[0].Allowed || auditEntryReason(entries[0]) != "plugin_scope_denied" {
+		t.Fatalf("expected scope-denied console read audit entry, got %+v", entries[0])
+	}
+}
+
+func TestConsoleAPIServesFilteredLogsOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	api := NewConsoleAPI(nil, nil, Config{}, []string{"runtime started", "plugin-echo ready", "plugin-ai-chat queued"}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?log_query=plugin-echo", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "plugin-ai-chat queued") {
+		t.Fatalf("expected filtered logs to exclude unrelated lines, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "plugin-echo ready") {
+		t.Fatalf("expected filtered logs to include matching line, got %s", recorder.Body.String())
+	}
+}
+
+func TestConsoleAPITreatsWhitespaceOnlyLogQueryAsUnfiltered(t *testing.T) {
+	t.Parallel()
+
+	api := NewConsoleAPI(nil, nil, Config{}, []string{"runtime started", "plugin-echo ready"}, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?log_query=%20%20", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	for _, expected := range []string{"runtime started", "plugin-echo ready"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("expected whitespace-only log query to keep %q, got %s", expected, recorder.Body.String())
+		}
+	}
+}
+
+func TestConsoleAPIServesFilteredJobsOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	queue := NewJobQueue()
+	if err := queue.Enqueue(context.Background(), NewJob("job-ai", "ai.call", 1, 30*time.Second)); err != nil {
+		t.Fatalf("enqueue first job: %v", err)
+	}
+	if err := queue.Enqueue(context.Background(), NewJob("job-sync", "adapter.sync", 1, 30*time.Second)); err != nil {
+		t.Fatalf("enqueue second job: %v", err)
+	}
+	api := NewConsoleAPI(nil, queue, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?job_query=ai.call", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "adapter.sync") {
+		t.Fatalf("expected filtered jobs to exclude unrelated entries, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "ai.call") {
+		t.Fatalf("expected filtered jobs to include matching entry, got %s", recorder.Body.String())
+	}
+}
+
+func TestConsoleAPIServesFilteredPluginOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	for _, manifest := range []pluginsdk.PluginManifest{
+		{
+			ID:         "plugin-echo",
+			Name:       "Echo Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+		},
+		{
+			ID:         "plugin-admin",
+			Name:       "Admin Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-admin", Symbol: "Plugin"},
+		},
+	} {
+		if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+			Manifest: manifest,
+			Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+		}); err != nil {
+			t.Fatalf("register plugin %s: %v", manifest.ID, err)
+		}
+	}
+	failureAt := time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-echo", Kind: "event", Success: false, Error: "dispatch timeout", At: failureAt})
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-admin", Kind: "event", Success: true, At: failureAt.Add(2 * time.Minute)})
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?plugin_id=plugin-echo", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "plugin-admin") {
+		t.Fatalf("expected filtered plugins to exclude unrelated plugin, got %s", recorder.Body.String())
+	}
+	for _, expected := range []string{"plugin-echo", `"lastDispatchSuccess": false`, `"statusRecovery": "last-dispatch-failed"`, `"lastDispatchError": "dispatch timeout"`, `"currentFailureStreak": 1`} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("expected filtered plugin response to contain %q, got %s", expected, recorder.Body.String())
+		}
+	}
+}
+
+func TestConsoleAPITreatsWhitespaceOnlyPluginQueryAsUnfiltered(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	for _, manifest := range []pluginsdk.PluginManifest{
+		{
+			ID:         "plugin-echo",
+			Name:       "Echo Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+		},
+		{
+			ID:         "plugin-admin",
+			Name:       "Admin Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-admin", Symbol: "Plugin"},
+		},
+	} {
+		if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+			Manifest: manifest,
+			Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+		}); err != nil {
+			t.Fatalf("register plugin %s: %v", manifest.ID, err)
+		}
+	}
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?plugin_id=%20%20", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	for _, expected := range []string{"plugin-echo", "plugin-admin"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("expected whitespace-only plugin query to keep %q, got %s", expected, recorder.Body.String())
+		}
+	}
+}
+
+func TestConsoleAPIUnknownPluginQueryReturnsEmptyPluginList(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-echo",
+			Name:       "Echo Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?plugin_id=plugin-missing", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "plugin-echo") {
+		t.Fatalf("expected unknown plugin query to exclude registered plugins, got %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"plugins": []`) {
+		t.Fatalf("expected unknown plugin query to return empty plugin list, got %s", recorder.Body.String())
+	}
+}
+
+func TestConsoleAPITreatsWhitespaceOnlyJobQueryAsUnfiltered(t *testing.T) {
+	t.Parallel()
+
+	queue := NewJobQueue()
+	if err := queue.Enqueue(context.Background(), NewJob("job-ai", "ai.call", 1, 30*time.Second)); err != nil {
+		t.Fatalf("enqueue first job: %v", err)
+	}
+	if err := queue.Enqueue(context.Background(), NewJob("job-sync", "adapter.sync", 1, 30*time.Second)); err != nil {
+		t.Fatalf("enqueue second job: %v", err)
+	}
+	api := NewConsoleAPI(nil, queue, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/console?job_query=%20%20", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	for _, expected := range []string{"ai.call", "adapter.sync"} {
+		if !strings.Contains(recorder.Body.String(), expected) {
+			t.Fatalf("expected whitespace-only job query to keep %q, got %s", expected, recorder.Body.String())
+		}
+	}
+}
+
+func TestConsoleAPIRejectsNonGetRequests(t *testing.T) {
+	t.Parallel()
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/console", nil)
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestConsoleAPIRenderJSONMatchesFrontendJobContract(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	queue := NewJobQueue()
+	job := NewJob("job-console-contract", "ai.call", 2, 30*time.Second)
+	job.Correlation = "corr-console"
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+		"session_id":   "session-user-42",
+	}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	raw, err := NewConsoleAPI(runtime, queue, Config{}, nil, nil).RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+
+	var payload struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("decode console payload: %v", err)
+	}
+	if len(payload.Jobs) != 1 {
+		t.Fatalf("expected one job in payload, got %+v", payload.Jobs)
+	}
+	jobPayload := payload.Jobs[0]
+	for _, key := range []string{"id", "type", "status", "retryCount", "maxRetries", "timeout", "createdAt", "deadLetter", "correlation", "targetPluginId", "dispatchMetadataPresent", "dispatchContractPresent", "queueContractComplete", "dispatchReady", "queueStateSummary", "dispatchSummary", "queueContractSummary", "dispatchPermission", "dispatchActor", "replyHandlePresent", "replyHandleCapability", "replyContractPresent", "replySummary", "sessionIDPresent", "replyTargetPresent"} {
+		if _, ok := jobPayload[key]; !ok {
+			t.Fatalf("expected frontend job key %q in payload, got %+v", key, jobPayload)
+		}
+	}
+	if got, ok := jobPayload["dispatchMetadataPresent"].(bool); !ok || !got {
+		t.Fatalf("expected dispatchMetadataPresent=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["dispatchContractPresent"].(bool); !ok || !got {
+		t.Fatalf("expected dispatchContractPresent=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["queueContractComplete"].(bool); !ok || !got {
+		t.Fatalf("expected queueContractComplete=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["dispatchReady"].(bool); !ok || !got {
+		t.Fatalf("expected dispatchReady=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["queueStateSummary"].(string); !ok || got != "ready" {
+		t.Fatalf("expected queueStateSummary=ready, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["replyHandlePresent"].(bool); !ok || !got {
+		t.Fatalf("expected replyHandlePresent=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["replyHandleCapability"].(string); !ok || got != "onebot.reply" {
+		t.Fatalf("expected replyHandleCapability=onebot.reply, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["replyContractPresent"].(bool); !ok || !got {
+		t.Fatalf("expected replyContractPresent=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["replySummary"].(string); !ok || got != "onebot.reply -> group-42" {
+		t.Fatalf("expected replySummary, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["dispatchSummary"].(string); !ok || got != "runtime-job-runner -> plugin-ai-chat [job:run]" {
+		t.Fatalf("expected dispatchSummary, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["queueContractSummary"].(string); !ok || got != "runtime-job-runner -> plugin-ai-chat [job:run] | onebot.reply -> group-42" {
+		t.Fatalf("expected queueContractSummary, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["sessionIDPresent"].(bool); !ok || !got {
+		t.Fatalf("expected sessionIDPresent=true, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["replyTargetPresent"].(bool); !ok || !got {
+		t.Fatalf("expected replyTargetPresent=true, got %+v", jobPayload)
+	}
+	if _, wrong := jobPayload["ID"]; wrong {
+		t.Fatalf("expected camelCase job payload keys only, got %+v", jobPayload)
+	}
+	if _, ok := jobPayload["timeout"].(float64); !ok {
+		t.Fatalf("expected numeric timeout for live JSON payload, got %T (%+v)", jobPayload["timeout"], jobPayload["timeout"])
+	}
+}
+
+func TestQueuedStateSummary(t *testing.T) {
+	t.Parallel()
+
+	future := time.Now().UTC().Add(1 * time.Hour)
+	for _, tc := range []struct {
+		name                    string
+		job                     Job
+		dispatchMetadataPresent bool
+		dispatchContractPresent bool
+		dispatchReady           bool
+		want                    string
+	}{
+		{name: "no dispatch metadata falls back to raw status", job: Job{Status: JobStatusPending}, want: string(JobStatusPending)},
+		{name: "ready complete contract", job: Job{Status: JobStatusPending}, dispatchMetadataPresent: true, dispatchContractPresent: true, dispatchReady: true, want: "ready"},
+		{name: "ready incomplete contract", job: Job{Status: JobStatusPending}, dispatchMetadataPresent: true, dispatchReady: true, want: "ready-incomplete-contract"},
+		{name: "waiting retry", job: Job{Status: JobStatusRetrying, NextRunAt: &future}, dispatchMetadataPresent: true, want: "waiting-retry"},
+		{name: "pending with dispatch metadata but not ready", job: Job{Status: JobStatusPending}, dispatchMetadataPresent: true, want: "pending"},
+		{name: "done falls back to raw status", job: Job{Status: JobStatusDone}, dispatchMetadataPresent: true, want: string(JobStatusDone)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queuedStateSummary(tc.job, tc.dispatchMetadataPresent, tc.dispatchContractPresent, tc.dispatchReady); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestQueuedContractSummary(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		dispatch string
+		reply    string
+		want     string
+	}{
+		{name: "both empty", want: ""},
+		{name: "dispatch only", dispatch: "runtime-job-runner -> plugin-ai-chat [job:run]", want: "runtime-job-runner -> plugin-ai-chat [job:run]"},
+		{name: "reply only", reply: "onebot.reply -> group-42", want: "onebot.reply -> group-42"},
+		{name: "both present", dispatch: "runtime-job-runner -> plugin-ai-chat [job:run]", reply: "onebot.reply -> group-42", want: "runtime-job-runner -> plugin-ai-chat [job:run] | onebot.reply -> group-42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queuedContractSummary(tc.dispatch, tc.reply); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestQueuedReplySummary(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		capability string
+		target     string
+		want       string
+	}{
+		{name: "both empty", want: ""},
+		{name: "capability only", capability: "onebot.reply", want: "onebot.reply"},
+		{name: "target only", target: "group-42", want: "reply -> group-42"},
+		{name: "both present", capability: "onebot.reply", target: "group-42", want: "onebot.reply -> group-42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := queuedReplySummary(tc.capability, tc.target); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConsoleAPIJobSummariesShowWaitingRetryForFutureRetryingJob(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	queue := NewJobQueue()
+	nextRunAt := time.Now().UTC().Add(1 * time.Hour)
+	job := NewJob("job-console-waiting-retry", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusRetrying
+	job.NextRunAt = &nextRunAt
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+	}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	queue.jobs[job.ID] = job
+
+	jobs, err := NewConsoleAPI(runtime, queue, Config{}, nil, nil).Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != "waiting-retry" {
+		t.Fatalf("expected queueStateSummary=waiting-retry, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIJobSummariesShowReadyIncompleteContractWhenReplyTargetMissing(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	queue := NewJobQueue()
+	job := NewJob("job-console-incomplete-reply-contract", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+	}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+
+	jobs, err := NewConsoleAPI(runtime, queue, Config{}, nil, nil).Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if !jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=true, got %+v", jobs[0])
+	}
+	if !jobs[0].DispatchContractPresent {
+		t.Fatalf("expected dispatchContractPresent=true, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractComplete {
+		t.Fatalf("expected queueContractComplete=false, got %+v", jobs[0])
+	}
+	if jobs[0].ReplyContractPresent {
+		t.Fatalf("expected replyContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != "ready" {
+		t.Fatalf("expected queueStateSummary=ready, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractSummary != "runtime-job-runner -> plugin-ai-chat [job:run] | onebot.reply" {
+		t.Fatalf("expected partial queueContractSummary for missing reply_target, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedSchedulesAndStatusFromStore(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	createdAt := time.Now().UTC()
+	dueAt := createdAt.Add(30 * time.Second)
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-console-1",
+			Kind:      ScheduleKindDelay,
+			Delay:     30 * time.Second,
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+			Metadata:  map[string]any{"message_text": "console schedule"},
+		},
+		DueAt:     &dueAt,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(NewSQLiteConsoleScheduleReader(store))
+
+	status, err := api.Status()
+	if err != nil {
+		t.Fatalf("console status: %v", err)
+	}
+	if status.Schedules != 1 {
+		t.Fatalf("expected schedule status count to come from persisted plans, got %+v", status)
+	}
+
+	rendered, err := api.RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	for _, expected := range []string{"schedules", "schedule-console-1", "runtime-demo-scheduler", "message.received"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected console output to contain %q, got %s", expected, rendered)
+		}
+	}
+
+	var payload struct {
+		Status struct {
+			Schedules int `json:"schedules"`
+		} `json:"status"`
+		Schedules []map[string]any `json:"schedules"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &payload); err != nil {
+		t.Fatalf("decode console payload: %v", err)
+	}
+	if payload.Status.Schedules != 1 {
+		t.Fatalf("expected payload status.schedules=1, got %+v", payload.Status)
+	}
+	if len(payload.Schedules) != 1 {
+		t.Fatalf("expected one schedule in payload, got %+v", payload.Schedules)
+	}
+	schedulePayload := payload.Schedules[0]
+	for _, key := range []string{"id", "kind", "source", "eventType", "delayMs", "executeAt", "dueAt", "dueReady", "dueStateSummary", "dueSummary", "scheduleSummary", "createdAt", "updatedAt"} {
+		if _, ok := schedulePayload[key]; !ok {
+			t.Fatalf("expected frontend schedule key %q in payload, got %+v", key, schedulePayload)
+		}
+	}
+	if got, ok := schedulePayload["dueReady"].(bool); !ok || got {
+		t.Fatalf("expected dueReady=false for future schedule, got %+v", schedulePayload)
+	}
+	if got, ok := schedulePayload["dueStateSummary"].(string); !ok || got != "scheduled" {
+		t.Fatalf("expected dueStateSummary=scheduled, got %+v", schedulePayload)
+	}
+	if got, ok := schedulePayload["dueSummary"].(string); !ok || !strings.Contains(got, "delay scheduled at ") {
+		t.Fatalf("expected dueSummary to describe scheduled delay, got %+v", schedulePayload)
+	}
+	if got, ok := schedulePayload["scheduleSummary"].(string); !ok || !strings.Contains(got, "message.received | delay scheduled at ") {
+		t.Fatalf("expected scheduleSummary to combine event type and due summary, got %+v", schedulePayload)
+	}
+	if _, wrong := schedulePayload["Plan"]; wrong {
+		t.Fatalf("expected flattened schedule payload, got %+v", schedulePayload)
+	}
+}
+
+func TestConsoleAPIExposesComputedDueAtForPersistedDelayScheduleWhenDueAtMissing(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	createdAt := time.Now().UTC()
+	plan := SchedulePlan{ID: "schedule-console-computed-dueat", Kind: ScheduleKindDelay, Delay: 45 * time.Second, Source: "runtime-demo-scheduler", EventType: "message.received"}
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{Plan: plan, DueAt: nil, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(NewSQLiteConsoleScheduleReader(store))
+
+	schedules, err := api.Schedules()
+	if err != nil {
+		t.Fatalf("console schedules: %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("expected one schedule, got %+v", schedules)
+	}
+	if schedules[0].DueAt == nil {
+		t.Fatalf("expected computed dueAt, got %+v", schedules[0])
+	}
+	want := createdAt.Add(plan.Delay)
+	if !schedules[0].DueAt.Equal(want) {
+		t.Fatalf("expected dueAt=%s, got %+v", want, schedules[0])
+	}
+	if schedules[0].DueReady {
+		t.Fatalf("expected dueReady=false for future computed dueAt, got %+v", schedules[0])
+	}
+	if schedules[0].DueStateSummary != "scheduled" {
+		t.Fatalf("expected dueStateSummary=scheduled, got %+v", schedules[0])
+	}
+}
+
+func TestConsoleAPIExposesComputedDueAtForPersistedOneShotScheduleWhenDueAtMissing(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	executeAt := time.Now().UTC().Add(45 * time.Second)
+	plan := SchedulePlan{ID: "schedule-console-computed-oneshot-dueat", Kind: ScheduleKindOneShot, ExecuteAt: executeAt, Source: "runtime-demo-scheduler", EventType: "message.received"}
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{Plan: plan, DueAt: nil, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(NewSQLiteConsoleScheduleReader(store))
+
+	schedules, err := api.Schedules()
+	if err != nil {
+		t.Fatalf("console schedules: %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("expected one schedule, got %+v", schedules)
+	}
+	if schedules[0].DueAt == nil {
+		t.Fatalf("expected computed dueAt, got %+v", schedules[0])
+	}
+	if !schedules[0].DueAt.Equal(executeAt) {
+		t.Fatalf("expected dueAt=%s, got %+v", executeAt, schedules[0])
+	}
+	if schedules[0].DueReady {
+		t.Fatalf("expected dueReady=false for future one-shot dueAt, got %+v", schedules[0])
+	}
+	if schedules[0].DueStateSummary != "scheduled" {
+		t.Fatalf("expected dueStateSummary=scheduled, got %+v", schedules[0])
+	}
+	if schedules[0].DueSummary == "" || !strings.Contains(schedules[0].DueSummary, "one-shot scheduled at ") {
+		t.Fatalf("expected dueSummary to describe scheduled one-shot, got %+v", schedules[0])
+	}
+	if schedules[0].ScheduleSummary == "" || !strings.Contains(schedules[0].ScheduleSummary, "message.received | one-shot scheduled at ") {
+		t.Fatalf("expected scheduleSummary to describe scheduled one-shot, got %+v", schedules[0])
+	}
+}
+
+func TestConsoleAPIExposesComputedDueAtForPersistedCronScheduleWhenDueAtMissing(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	createdAt := time.Date(2026, 4, 9, 15, 0, 0, 0, time.UTC)
+	plan := SchedulePlan{ID: "schedule-console-computed-cron-dueat", Kind: ScheduleKindCron, CronExpr: "* * * * *", Source: "runtime-demo-scheduler", EventType: "message.received"}
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{Plan: plan, DueAt: nil, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(NewSQLiteConsoleScheduleReader(store))
+
+	schedules, err := api.Schedules()
+	if err != nil {
+		t.Fatalf("console schedules: %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("expected one schedule, got %+v", schedules)
+	}
+	if schedules[0].DueAt == nil {
+		t.Fatalf("expected computed dueAt, got %+v", schedules[0])
+	}
+	if !schedules[0].DueAt.After(createdAt) {
+		t.Fatalf("expected computed cron dueAt after createdAt, got %+v", schedules[0])
+	}
+	if schedules[0].DueReady {
+		t.Fatalf("expected dueReady=false for future cron dueAt, got %+v", schedules[0])
+	}
+	if schedules[0].DueStateSummary != "scheduled" {
+		t.Fatalf("expected dueStateSummary=scheduled, got %+v", schedules[0])
+	}
+	if schedules[0].DueSummary == "" || !strings.Contains(schedules[0].DueSummary, "cron scheduled at ") {
+		t.Fatalf("expected dueSummary to describe scheduled cron, got %+v", schedules[0])
+	}
+	if schedules[0].ScheduleSummary == "" || !strings.Contains(schedules[0].ScheduleSummary, "message.received | cron scheduled at ") {
+		t.Fatalf("expected scheduleSummary to describe scheduled cron, got %+v", schedules[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedDueScheduleAsDue(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	createdAt := time.Now().UTC().Add(-2 * time.Minute)
+	dueAt := createdAt.Add(-30 * time.Second)
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-console-due-1",
+			Kind:      ScheduleKindDelay,
+			Delay:     30 * time.Second,
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+		},
+		DueAt:     &dueAt,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(NewSQLiteConsoleScheduleReader(store))
+
+	schedules, err := api.Schedules()
+	if err != nil {
+		t.Fatalf("console schedules: %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("expected one schedule, got %+v", schedules)
+	}
+	if !schedules[0].DueReady {
+		t.Fatalf("expected dueReady=true, got %+v", schedules[0])
+	}
+	if schedules[0].DueStateSummary != "due" {
+		t.Fatalf("expected dueStateSummary=due, got %+v", schedules[0])
+	}
+	if schedules[0].DueSummary == "" || !strings.Contains(schedules[0].DueSummary, "delay due at ") {
+		t.Fatalf("expected dueSummary to describe due delay, got %+v", schedules[0])
+	}
+}
+
+func TestConsoleScheduleStateSummary(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	future := now.Add(1 * time.Hour)
+	past := now.Add(-1 * time.Hour)
+	for _, tc := range []struct {
+		name  string
+		dueAt *time.Time
+		ready bool
+		want  string
+	}{
+		{name: "missing dueAt", want: ""},
+		{name: "future schedule", dueAt: &future, ready: false, want: "scheduled"},
+		{name: "past due schedule", dueAt: &past, ready: true, want: "due"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := consoleScheduleStateSummary(tc.dueAt, tc.ready); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConsoleScheduleDueSummary(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		kind  string
+		dueAt *time.Time
+		ready bool
+		want  string
+	}{
+		{name: "missing dueAt", kind: "delay", want: ""},
+		{name: "scheduled delay", kind: "delay", dueAt: &now, ready: false, want: "delay scheduled at 2026-04-09T12:00:00Z"},
+		{name: "due delay", kind: "delay", dueAt: &now, ready: true, want: "delay due at 2026-04-09T12:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := consoleScheduleDueSummary(tc.kind, tc.dueAt, tc.ready); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConsoleScheduleSummary(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		kind      string
+		dueAt     *time.Time
+		ready     bool
+		want      string
+	}{
+		{name: "missing event and due", want: ""},
+		{name: "event only", eventType: "message.received", want: "message.received"},
+		{name: "due only", kind: "delay", dueAt: &now, want: "delay scheduled at 2026-04-09T12:00:00Z"},
+		{name: "event and due", eventType: "message.received", kind: "delay", dueAt: &now, want: "message.received | delay scheduled at 2026-04-09T12:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := consoleScheduleSummary(tc.eventType, tc.kind, tc.dueAt, tc.ready); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConsoleScheduleDueReady(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	future := now.Add(1 * time.Hour)
+	past := now.Add(-1 * time.Hour)
+	for _, tc := range []struct {
+		name  string
+		dueAt *time.Time
+		want  bool
+	}{
+		{name: "missing dueAt", want: false},
+		{name: "future dueAt", dueAt: &future, want: false},
+		{name: "past dueAt", dueAt: &past, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := consoleScheduleDueReady(tc.dueAt, now); got != tc.want {
+				t.Fatalf("expected %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestConsoleAPIExposesPersistedJobsAndStatusFromStore(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	job := NewJob("job-console-persisted", "ai.chat", 2, 30*time.Second)
+	job.TraceID = "trace-console-job"
+	job.EventID = "evt-console-job"
+	job.Correlation = "corr-console-job"
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"prompt": "hello persisted",
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+		"session_id":   "session-user-99",
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	if got, err := api.Jobs(); err != nil || len(got) != 1 || got[0].ID != job.ID {
+		t.Fatalf("expected persisted jobs to be exposed, got %+v", got)
+	}
+	status, err := api.Status()
+	if err != nil {
+		t.Fatalf("console status: %v", err)
+	}
+	if status.Jobs != 1 {
+		t.Fatalf("expected persisted job status count, got %+v", status)
+	}
+
+	rendered, err := api.RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	for _, expected := range []string{"job-console-persisted", `"jobs": 1`, "corr-console-job"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("expected rendered console to contain %q, got %s", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, "hello persisted") {
+		t.Fatalf("expected persisted job payload to be redacted, got %s", rendered)
+	}
+	if !strings.Contains(rendered, `"redacted": true`) || !strings.Contains(rendered, `"keys": [`) {
+		t.Fatalf("expected sanitized job payload metadata, got %s", rendered)
+	}
+	var payload struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &payload); err != nil {
+		t.Fatalf("decode persisted console payload: %v", err)
+	}
+	if len(payload.Jobs) != 1 {
+		t.Fatalf("expected one persisted job in payload, got %+v", payload.Jobs)
+	}
+	jobPayload := payload.Jobs[0]
+	for key, want := range map[string]any{
+		"targetPluginId":          "plugin-ai-chat",
+		"dispatchMetadataPresent": true,
+		"dispatchContractPresent": true,
+		"queueContractComplete":   true,
+		"dispatchReady":           true,
+		"queueStateSummary":       "ready",
+		"dispatchSummary":         "runtime-job-runner -> plugin-ai-chat [job:run]",
+		"queueContractSummary":    "runtime-job-runner -> plugin-ai-chat [job:run] | onebot.reply -> group-42",
+		"dispatchPermission":      "job:run",
+		"dispatchActor":           "runtime-job-runner",
+		"replyHandlePresent":      true,
+		"replyHandleCapability":   "onebot.reply",
+		"replyContractPresent":    true,
+		"replySummary":            "onebot.reply -> group-42",
+		"sessionIDPresent":        true,
+		"replyTargetPresent":      true,
+	} {
+		if got, ok := jobPayload[key]; !ok || got != want {
+			t.Fatalf("expected persisted job %q=%v, got %+v", key, want, jobPayload)
+		}
+	}
+}
+
+func TestConsoleAPIExposesPersistedRetryingJobAsWaitingRetry(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	nextRunAt := time.Now().UTC().Add(1 * time.Hour)
+	job := NewJob("job-console-persisted-waiting-retry", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusRetrying
+	job.NextRunAt = &nextRunAt
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != "waiting-retry" {
+		t.Fatalf("expected queueStateSummary=waiting-retry, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedPartialReplyContractSummary(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	job := NewJob("job-console-persisted-partial-reply", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if !jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=true, got %+v", jobs[0])
+	}
+	if !jobs[0].DispatchContractPresent {
+		t.Fatalf("expected dispatchContractPresent=true, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractComplete {
+		t.Fatalf("expected queueContractComplete=false, got %+v", jobs[0])
+	}
+	if jobs[0].ReplyContractPresent {
+		t.Fatalf("expected replyContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != "ready" {
+		t.Fatalf("expected queueStateSummary=ready, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractSummary != "runtime-job-runner -> plugin-ai-chat [job:run] | onebot.reply" {
+		t.Fatalf("expected partial queueContractSummary, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedJobWithoutDispatchMetadataAsNonDispatchable(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	job := NewJob("job-console-persisted-no-dispatch", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if jobs[0].DispatchMetadataPresent {
+		t.Fatalf("expected dispatchMetadataPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchContractPresent {
+		t.Fatalf("expected dispatchContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractComplete {
+		t.Fatalf("expected queueContractComplete=false, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != string(JobStatusPending) {
+		t.Fatalf("expected queueStateSummary=pending, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchSummary != "" {
+		t.Fatalf("expected empty dispatchSummary, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractSummary != "onebot.reply -> group-42" {
+		t.Fatalf("expected reply-only queueContractSummary, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedDispatchOnlyJobAsReadyIncompleteContract(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	job := NewJob("job-console-persisted-dispatch-only", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if !jobs[0].DispatchMetadataPresent {
+		t.Fatalf("expected dispatchMetadataPresent=true, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchContractPresent {
+		t.Fatalf("expected dispatchContractPresent=false without reply_handle, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractComplete {
+		t.Fatalf("expected queueContractComplete=false, got %+v", jobs[0])
+	}
+	if !jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=true for pending dispatch-only job, got %+v", jobs[0])
+	}
+	if jobs[0].ReplyContractPresent {
+		t.Fatalf("expected replyContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != "ready-incomplete-contract" {
+		t.Fatalf("expected queueStateSummary=ready-incomplete-contract, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchSummary != "runtime-job-runner -> plugin-ai-chat [job:run]" {
+		t.Fatalf("expected dispatchSummary, got %+v", jobs[0])
+	}
+	if jobs[0].QueueContractSummary != "runtime-job-runner -> plugin-ai-chat [job:run]" {
+		t.Fatalf("expected dispatch-only queueContractSummary, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIExposesPersistedJobWithoutDispatchOrReplyContractAsBarePending(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	job := NewJob("job-console-persisted-no-contract", "ai.chat", 2, 30*time.Second)
+	job.Status = JobStatusPending
+	job.Payload = map[string]any{
+		"prompt": "hello persisted",
+	}
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(NewSQLiteConsoleJobReader(store))
+
+	jobs, err := api.Jobs()
+	if err != nil {
+		t.Fatalf("console jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %+v", jobs)
+	}
+	if jobs[0].DispatchMetadataPresent {
+		t.Fatalf("expected dispatchMetadataPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchContractPresent {
+		t.Fatalf("expected dispatchContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].ReplyContractPresent {
+		t.Fatalf("expected replyContractPresent=false, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchReady {
+		t.Fatalf("expected dispatchReady=false, got %+v", jobs[0])
+	}
+	if jobs[0].QueueStateSummary != string(JobStatusPending) {
+		t.Fatalf("expected queueStateSummary=pending, got %+v", jobs[0])
+	}
+	if jobs[0].DispatchSummary != "" || jobs[0].ReplySummary != "" || jobs[0].QueueContractSummary != "" {
+		t.Fatalf("expected empty summaries for no-contract job, got %+v", jobs[0])
+	}
+}
+
+func TestConsoleAPIPropagatesScheduleReadFailuresOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetScheduleReader(failingConsoleScheduleReader{err: errors.New("schedule store unavailable")})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	resp := httptest.NewRecorder()
+	api.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "schedule store unavailable") {
+		t.Fatalf("expected console error response to mention schedule read failure, got %s", resp.Body.String())
+	}
+}
+
+func TestConsoleAPIPropagatesJobReadFailuresOverHTTP(t *testing.T) {
+	t.Parallel()
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, nil)
+	api.SetJobReader(failingConsoleJobReader{err: errors.New("job store unavailable")})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	resp := httptest.NewRecorder()
+	api.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "job store unavailable") {
+		t.Fatalf("expected console error response to mention job read failure, got %s", resp.Body.String())
+	}
+}
+
+type failingConsoleScheduleReader struct{ err error }
+
+func (r failingConsoleScheduleReader) ListSchedulePlans() ([]ConsoleSchedule, error) {
+	return nil, r.err
+}
+
+type failingConsoleJobReader struct{ err error }
+
+func (r failingConsoleJobReader) ListJobs() ([]Job, error) {
+	return nil, r.err
+}
+
+type noopConsoleHandler struct{}
+
+func (noopConsoleHandler) OnEvent(event eventmodel.Event, ctx eventmodel.ExecutionContext) error {
+	return nil
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "event": {
+      "event_id": "evt-onebot-message-001",
+      "trace_id": "trace-onebot-001",
+      "source": "onebot",
+      "type": "message.received",
+      "timestamp": "2026-04-02T09:30:00Z",
+      "actor": {
+        "id": "user-10001",
+        "type": "user",
+        "display_name": "alice"
+      },
+      "channel": {
+        "id": "group-42",
+        "type": "group",
+        "title": "ops-room"
+      },
+      "message": {
+        "id": "msg-9001",
+        "text": "hello platform"
+      },
+      "metadata": {
+        "adapter": "onebot/v11"
+      },
+      "idempotency_key": "onebot:message:9001"
+    },
+    "context": {
+      "trace_id": "trace-onebot-001",
+      "event_id": "evt-onebot-message-001",
+      "correlation_id": "corr-onebot-001",
+      "reply": {
+        "capability": "reply_text",
+        "target_id": "group-42",
+        "message_id": "msg-9001"
+      }
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-webhook-command-001",
+      "trace_id": "trace-webhook-001",
+      "source": "webhook",
+      "type": "command.received",
+      "timestamp": "2026-04-02T09:45:00Z",
+      "actor": {
+        "id": "service-deploy",
+        "type": "service"
+      },
+      "command": {
+        "name": "deploy",
+        "arguments": [
+          "prod"
+        ],
+        "raw": "/deploy prod"
+      },
+      "metadata": {
+        "signature_verified": true
+      },
+      "idempotency_key": "webhook:deploy:2026-04-02T09:45:00Z"
+    },
+    "context": {
+      "trace_id": "trace-webhook-001",
+      "event_id": "evt-webhook-command-001",
+      "plugin_id": "plugin-admin",
+      "run_id": "run-admin-001"
+    }
+  },
+  {
+    "event": {
+      "event_id": "evt-scheduler-trigger-001",
+      "trace_id": "trace-scheduler-001",
+      "source": "scheduler",
+      "type": "schedule.triggered",
+      "timestamp": "2026-04-02T10:00:00Z",
+      "system": {
+        "name": "daily-summary",
+        "status": "triggered"
+      },
+      "metadata": {
+        "schedule_type": "cron"
+      },
+      "idempotency_key": "scheduler:daily-summary:2026-04-02T10:00:00Z"
+    },
+    "context": {
+      "trace_id": "trace-scheduler-001",
+      "event_id": "evt-scheduler-trigger-001",
+      "plugin_id": "plugin-scheduler",
+      "correlation_id": "cron-daily-summary"
+    }
+  }
+]

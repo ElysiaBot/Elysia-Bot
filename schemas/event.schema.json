@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ohmyopencode/bot-platform/schemas/event.schema.json",
+  "title": "bot-platform event model v0",
+  "type": "object",
+  "required": [
+    "event_id",
+    "trace_id",
+    "source",
+    "type",
+    "timestamp",
+    "idempotency_key"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "$ref": "#/$defs/actor"
+    },
+    "channel": {
+      "$ref": "#/$defs/channel"
+    },
+    "message": {
+      "$ref": "#/$defs/message"
+    },
+    "reply": {
+      "$ref": "#/$defs/replyHandle"
+    },
+    "command": {
+      "$ref": "#/$defs/commandInvocation"
+    },
+    "system": {
+      "$ref": "#/$defs/systemEvent"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "actor": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "display_name": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "channel": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "title": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "attachment": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "id": {"type": "string"},
+        "type": {"type": "string", "minLength": 1},
+        "url": {"type": "string"},
+        "name": {"type": "string"},
+        "mime_type": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "message": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "attachments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/attachment"}
+        },
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "commandInvocation": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "arguments": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "raw": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "systemEvent": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "status": {"type": "string"},
+        "reason": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "replyHandle": {
+      "type": "object",
+      "required": ["capability", "target_id"],
+      "properties": {
+        "capability": {"type": "string", "minLength": 1},
+        "target_id": {"type": "string", "minLength": 1},
+        "message_id": {"type": "string"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    },
+    "executionContext": {
+      "type": "object",
+      "required": ["trace_id", "event_id"],
+      "properties": {
+        "trace_id": {"type": "string", "minLength": 1},
+        "event_id": {"type": "string", "minLength": 1},
+        "plugin_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "reply": {"$ref": "#/$defs/replyHandle"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      },
+      "additionalProperties": false
+    }
+  }
+}

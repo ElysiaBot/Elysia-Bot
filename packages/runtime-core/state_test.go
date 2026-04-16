@@ -1,0 +1,458 @@
+package runtimecore
+
+import (
+	"context"
+	"database/sql"
+	"path/filepath"
+	"testing"
+	"time"
+
+	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
+)
+
+func TestSQLiteStateStorePersistsCoreMetadata(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	event := eventmodel.Event{
+		EventID:        "evt-store-1",
+		TraceID:        "trace-store-1",
+		Source:         "onebot",
+		Type:           "message.received",
+		Timestamp:      time.Date(2026, 4, 2, 17, 0, 0, 0, time.UTC),
+		IdempotencyKey: "onebot:msg:store-1",
+	}
+
+	if err := store.RecordEvent(ctx, event); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	if err := store.SavePluginManifest(ctx, pluginsdk.PluginManifest{
+		ID:         "plugin-echo",
+		Name:       "Echo Plugin",
+		Version:    "0.1.0",
+		APIVersion: "v0",
+		Mode:       pluginsdk.ModeSubprocess,
+		Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+	}); err != nil {
+		t.Fatalf("save plugin manifest: %v", err)
+	}
+	if err := store.SaveSession(ctx, SessionState{
+		SessionID: "session-1",
+		PluginID:  "plugin-echo",
+		State:     map[string]any{"last_message": "hello"},
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	if err := store.SaveIdempotencyKey(ctx, event.IdempotencyKey, event.EventID); err != nil {
+		t.Fatalf("save idempotency key: %v", err)
+	}
+	job := NewJob("job-store-1", "ai.chat", 2, 30*time.Second)
+	job.TraceID = "trace-job-store-1"
+	job.EventID = event.EventID
+	job.RunID = "run-job-store-1"
+	job.Correlation = event.IdempotencyKey
+	job.Payload = map[string]any{"prompt": "hello"}
+	if err := store.SaveJob(ctx, job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+	dueAt := time.Date(2026, 4, 7, 12, 0, 5, 0, time.UTC)
+	if err := store.SaveSchedulePlan(ctx, storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-store-1",
+			Kind:      ScheduleKindDelay,
+			Delay:     5 * time.Second,
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+			Metadata:  map[string]any{"message_text": "hello scheduler"},
+		},
+		DueAt:     &dueAt,
+		CreatedAt: time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	counts, err := store.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts: %v", err)
+	}
+	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+		t.Fatalf("unexpected counts: %+v", counts)
+	}
+}
+
+func TestSQLiteStateStoreRetainsMetadataAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	ctx := context.Background()
+
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SavePluginManifest(ctx, pluginsdk.PluginManifest{
+		ID:         "plugin-echo",
+		Name:       "Echo Plugin",
+		Version:    "0.1.0",
+		APIVersion: "v0",
+		Mode:       pluginsdk.ModeSubprocess,
+		Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-echo", Symbol: "Plugin"},
+	}); err != nil {
+		t.Fatalf("save plugin manifest: %v", err)
+	}
+	if err := store.SaveIdempotencyKey(ctx, "onebot:msg:reopen", "evt-reopen"); err != nil {
+		t.Fatalf("save idempotency key: %v", err)
+	}
+	job := NewJob("job-reopen-1", "demo.echo", 1, 15*time.Second)
+	job.TraceID = "trace-reopen-1"
+	job.EventID = "evt-reopen"
+	job.Correlation = "corr-reopen"
+	if err := store.SaveJob(ctx, job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+	if err := store.SaveSchedulePlan(ctx, storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-reopen-1",
+			Kind:      ScheduleKindCron,
+			CronExpr:  "0 * * * *",
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+		},
+		CreatedAt: time.Date(2026, 4, 7, 13, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 4, 7, 13, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	counts, err := reopened.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts after reopen: %v", err)
+	}
+	if counts["plugin_registry"] != 1 || counts["plugin_status_snapshots"] != 0 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+		t.Fatalf("expected persisted metadata after reopen, got %+v", counts)
+	}
+}
+
+func TestSQLiteStateStorePersistsPluginStatusSnapshotsAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	ctx := context.Background()
+	failureAt := time.Date(2026, 4, 15, 8, 0, 0, 0, time.UTC)
+	recoveredAt := failureAt.Add(2 * time.Minute)
+
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SavePluginStatusSnapshot(ctx, DispatchResult{PluginID: "plugin-echo", Kind: "event", Success: false, Error: "timeout", At: failureAt}); err != nil {
+		t.Fatalf("save failed plugin snapshot: %v", err)
+	}
+	if err := store.SavePluginStatusSnapshot(ctx, DispatchResult{PluginID: "plugin-echo", Kind: "event", Success: true, At: recoveredAt}); err != nil {
+		t.Fatalf("save recovered plugin snapshot: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	snapshot, err := reopened.LoadPluginStatusSnapshot(ctx, "plugin-echo")
+	if err != nil {
+		t.Fatalf("load plugin snapshot after reopen: %v", err)
+	}
+	if snapshot.PluginID != "plugin-echo" || snapshot.LastDispatchKind != "event" || !snapshot.LastDispatchSuccess {
+		t.Fatalf("expected reopened plugin snapshot identity/outcome, got %+v", snapshot)
+	}
+	if !snapshot.LastDispatchAt.Equal(recoveredAt) {
+		t.Fatalf("expected last dispatch at %s, got %+v", recoveredAt, snapshot)
+	}
+	if snapshot.LastRecoveredAt == nil || !snapshot.LastRecoveredAt.Equal(recoveredAt) || snapshot.LastRecoveryFailureCount != 1 || snapshot.CurrentFailureStreak != 0 {
+		t.Fatalf("expected recovery facts after reopen, got %+v", snapshot)
+	}
+
+	counts, err := reopened.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts after reopen: %v", err)
+	}
+	if counts["plugin_status_snapshots"] != 1 {
+		t.Fatalf("expected one persisted plugin snapshot, got %+v", counts)
+	}
+}
+
+func TestSQLiteStateStorePersistsSchedulePlansRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	createdAt := time.Date(2026, 4, 7, 14, 0, 0, 0, time.UTC)
+	dueAt := time.Date(2026, 4, 7, 14, 5, 0, 0, time.UTC)
+	record := storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-roundtrip-1",
+			Kind:      ScheduleKindOneShot,
+			ExecuteAt: time.Date(2026, 4, 7, 14, 10, 0, 0, time.UTC),
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+			Metadata:  map[string]any{"message_text": "hello once"},
+		},
+		DueAt:     &dueAt,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+
+	if err := store.SaveSchedulePlan(context.Background(), record); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+
+	loaded, err := store.LoadSchedulePlan(context.Background(), record.Plan.ID)
+	if err != nil {
+		t.Fatalf("load schedule plan: %v", err)
+	}
+	if loaded.Plan.ID != record.Plan.ID || loaded.Plan.Kind != record.Plan.Kind || loaded.Plan.EventType != record.Plan.EventType {
+		t.Fatalf("expected loaded schedule identity to match, got %+v", loaded)
+	}
+	if !loaded.Plan.ExecuteAt.Equal(record.Plan.ExecuteAt) || loaded.DueAt == nil || !loaded.DueAt.Equal(dueAt) {
+		t.Fatalf("expected execute/due timestamps to round-trip, got %+v", loaded)
+	}
+	if loaded.Plan.Metadata["message_text"] != "hello once" {
+		t.Fatalf("expected schedule metadata to round-trip, got %+v", loaded.Plan.Metadata)
+	}
+	plans, err := store.ListSchedulePlans(context.Background())
+	if err != nil {
+		t.Fatalf("list schedule plans: %v", err)
+	}
+	if len(plans) != 1 || plans[0].Plan.ID != record.Plan.ID {
+		t.Fatalf("expected one listed schedule plan, got %+v", plans)
+	}
+
+	if err := store.DeleteSchedulePlan(context.Background(), record.Plan.ID); err != nil {
+		t.Fatalf("delete schedule plan: %v", err)
+	}
+	if _, err := store.LoadSchedulePlan(context.Background(), record.Plan.ID); err == nil {
+		t.Fatal("expected deleted schedule plan to be gone")
+	}
+}
+
+func TestSQLiteStateStoreRetainsSchedulePlansAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SaveSchedulePlan(context.Background(), storedSchedulePlan{
+		Plan: SchedulePlan{
+			ID:        "schedule-reopen-2",
+			Kind:      ScheduleKindDelay,
+			Delay:     30 * time.Second,
+			Source:    "runtime-demo-scheduler",
+			EventType: "message.received",
+		},
+		CreatedAt: time.Date(2026, 4, 7, 15, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 4, 7, 15, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("save schedule plan: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	loaded, err := reopened.LoadSchedulePlan(context.Background(), "schedule-reopen-2")
+	if err != nil {
+		t.Fatalf("load schedule plan after reopen: %v", err)
+	}
+	if loaded.Plan.ID != "schedule-reopen-2" || loaded.Plan.Kind != ScheduleKindDelay || loaded.Plan.Delay != 30*time.Second {
+		t.Fatalf("expected reopened schedule plan to round-trip, got %+v", loaded)
+	}
+}
+
+func TestSQLiteStateStorePersistsJobsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	startedAt := time.Date(2026, 4, 7, 10, 0, 2, 0, time.UTC)
+	createdAt := time.Date(2026, 4, 7, 10, 0, 0, 0, time.UTC)
+	nextRunAt := time.Date(2026, 4, 7, 10, 0, 5, 0, time.UTC)
+	job := Job{
+		ID:          "job-roundtrip-1",
+		Type:        "ai.chat",
+		TraceID:     "trace-roundtrip-1",
+		EventID:     "evt-roundtrip-1",
+		RunID:       "run-roundtrip-1",
+		Status:      JobStatusRetrying,
+		Payload:     map[string]any{"prompt": "hello", "attempt": float64(1)},
+		RetryCount:  1,
+		MaxRetries:  3,
+		Timeout:     45 * time.Second,
+		LastError:   "mock upstream failure",
+		CreatedAt:   createdAt,
+		StartedAt:   &startedAt,
+		NextRunAt:   &nextRunAt,
+		DeadLetter:  false,
+		Correlation: "corr-roundtrip-1",
+	}
+
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	loaded, err := store.LoadJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if loaded.ID != job.ID || loaded.Type != job.Type || loaded.Status != job.Status {
+		t.Fatalf("expected loaded job identity/status to match, got %+v", loaded)
+	}
+	if loaded.RetryCount != job.RetryCount || loaded.MaxRetries != job.MaxRetries || loaded.Timeout != job.Timeout {
+		t.Fatalf("expected retry/timeout fields to round-trip, got %+v", loaded)
+	}
+	if loaded.TraceID != job.TraceID || loaded.EventID != job.EventID || loaded.RunID != job.RunID || loaded.Correlation != job.Correlation {
+		t.Fatalf("expected trace fields to round-trip, got %+v", loaded)
+	}
+	if loaded.LastError != job.LastError || loaded.DeadLetter != job.DeadLetter {
+		t.Fatalf("expected error/dead-letter fields to round-trip, got %+v", loaded)
+	}
+	if !loaded.CreatedAt.Equal(createdAt) || loaded.StartedAt == nil || !loaded.StartedAt.Equal(startedAt) || loaded.NextRunAt == nil || !loaded.NextRunAt.Equal(nextRunAt) {
+		t.Fatalf("expected timestamps to round-trip, got %+v", loaded)
+	}
+	if loaded.Payload["prompt"] != "hello" {
+		t.Fatalf("expected payload to round-trip, got %+v", loaded.Payload)
+	}
+
+	jobs, err := store.ListJobs(context.Background())
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != job.ID {
+		t.Fatalf("expected one listed job, got %+v", jobs)
+	}
+}
+
+func TestSQLiteStateStoreRetainsJobsAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	job := NewJob("job-reopen-2", "demo.echo", 0, 10*time.Second)
+	job.TraceID = "trace-reopen-2"
+	job.EventID = "evt-reopen-2"
+	job.Correlation = "corr-reopen-2"
+	if err := store.SaveJob(context.Background(), job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	loaded, err := reopened.LoadJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("load job after reopen: %v", err)
+	}
+	if loaded.ID != job.ID || loaded.Status != JobStatusPending || loaded.TraceID != job.TraceID {
+		t.Fatalf("expected job after reopen, got %+v", loaded)
+	}
+}
+
+func TestSQLiteStateStoreReturnsNoRowsForMissingPluginStatusSnapshot(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	if _, err := store.LoadPluginStatusSnapshot(context.Background(), "plugin-missing"); err != sql.ErrNoRows {
+		t.Fatalf("expected sql.ErrNoRows for missing plugin snapshot, got %v", err)
+	}
+}
+
+func TestSQLiteStateStoreIdempotencyLookup(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	if err := store.SaveIdempotencyKey(ctx, "onebot:msg:dup", "evt-dup"); err != nil {
+		t.Fatalf("save idempotency key: %v", err)
+	}
+
+	found, err := store.HasIdempotencyKey(ctx, "onebot:msg:dup")
+	if err != nil {
+		t.Fatalf("has idempotency key: %v", err)
+	}
+	if !found {
+		t.Fatal("expected idempotency key to be found")
+	}
+}
+
+func TestSQLiteStateStoreLoadsStoredEventPayload(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	original := eventmodel.Event{
+		EventID:        "evt-load-1",
+		TraceID:        "trace-load-1",
+		Source:         "webhook",
+		Type:           "webhook.received",
+		Timestamp:      time.Date(2026, 4, 3, 22, 0, 0, 0, time.UTC),
+		IdempotencyKey: "webhook:load:1",
+		Metadata:       map[string]any{"sample": "yes"},
+	}
+	if err := store.RecordEvent(context.Background(), original); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+
+	loaded, err := store.LoadEvent(context.Background(), original.EventID)
+	if err != nil {
+		t.Fatalf("load event: %v", err)
+	}
+	if loaded.EventID != original.EventID || loaded.TraceID != original.TraceID || loaded.IdempotencyKey != original.IdempotencyKey {
+		t.Fatalf("expected loaded event to match original identity, got %+v", loaded)
+	}
+	if loaded.Metadata["sample"] != "yes" {
+		t.Fatalf("expected metadata to round-trip, got %+v", loaded.Metadata)
+	}
+}
+
+func openTempSQLiteStore(t *testing.T) *SQLiteStateStore {
+	t.Helper()
+
+	store, err := OpenSQLiteStateStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	return store
+}
