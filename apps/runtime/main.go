@@ -77,6 +77,29 @@ type runtimeConfigCheckResult struct {
 	Error               string `json:"error,omitempty"`
 }
 
+type runtimeHealthResponse struct {
+	Status              string                  `json:"status"`
+	Environment         string                  `json:"environment"`
+	SQLitePath          string                  `json:"sqlite_path"`
+	SchedulerIntervalMs int                     `json:"scheduler_interval_ms"`
+	Components          runtimeHealthComponents `json:"components"`
+}
+
+type runtimeHealthComponents struct {
+	Storage   runtimeHealthStorageComponent   `json:"storage"`
+	Scheduler runtimeHealthSchedulerComponent `json:"scheduler"`
+}
+
+type runtimeHealthStorageComponent struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type runtimeHealthSchedulerComponent struct {
+	Status  string `json:"status"`
+	Running bool   `json:"running"`
+}
+
 type sqliteRuntimeSmokeStore struct {
 	store *runtimecore.SQLiteStateStore
 }
@@ -524,15 +547,46 @@ func (a *runtimeApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mux.ServeHTTP(w, r)
 }
 
-func (a *runtimeApp) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (a *runtimeApp) handleHealth(w http.ResponseWriter, r *http.Request) {
+	statusCode, response := a.runtimeHealth(r.Context())
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":             "ok",
-		"environment":        a.config.Runtime.Environment,
-		"sqlite_path":        a.settings.SQLitePath,
-		"scheduler_running":  a.scheduler != nil && a.scheduler.Running(),
-		"scheduler_interval": a.settings.SchedulerIntervalMs,
-	})
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (a *runtimeApp) runtimeHealth(ctx context.Context) (int, runtimeHealthResponse) {
+	schedulerRunning := a.scheduler != nil && a.scheduler.Running()
+	response := runtimeHealthResponse{
+		Environment:         a.config.Runtime.Environment,
+		SQLitePath:          a.settings.SQLitePath,
+		SchedulerIntervalMs: a.settings.SchedulerIntervalMs,
+		Components: runtimeHealthComponents{
+			Scheduler: runtimeHealthSchedulerComponent{
+				Running: schedulerRunning,
+			},
+		},
+	}
+	if schedulerRunning {
+		response.Components.Scheduler.Status = "ok"
+	} else {
+		response.Components.Scheduler.Status = "degraded"
+	}
+
+	if _, err := a.runtimeStateCounts(ctx); err != nil {
+		response.Status = "error"
+		response.Components.Storage.Status = "error"
+		response.Components.Storage.Error = err.Error()
+		return http.StatusServiceUnavailable, response
+	}
+
+	response.Components.Storage.Status = "ok"
+	if schedulerRunning {
+		response.Status = "ok"
+		return http.StatusOK, response
+	}
+
+	response.Status = "degraded"
+	return http.StatusOK, response
 }
 
 func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {

@@ -62,6 +62,55 @@ type runtimeConsoleResponse struct {
 	} `json:"status"`
 }
 
+type runtimeHealthTestResponse struct {
+	Status              string `json:"status"`
+	Environment         string `json:"environment"`
+	SQLitePath          string `json:"sqlite_path"`
+	SchedulerIntervalMs int    `json:"scheduler_interval_ms"`
+	Components          struct {
+		Storage struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"storage"`
+		Scheduler struct {
+			Status  string `json:"status"`
+			Running bool   `json:"running"`
+		} `json:"scheduler"`
+	} `json:"components"`
+}
+
+func decodeRuntimeHealthResponse(t *testing.T, raw []byte) runtimeHealthTestResponse {
+	t.Helper()
+	var payload runtimeHealthTestResponse
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		t.Fatalf("decode runtime health payload: %v\nraw=%s", err, string(raw))
+	}
+	return payload
+}
+
+func readRuntimeHealthResponse(t *testing.T, app *runtimeApp) (int, runtimeHealthTestResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	return resp.Code, decodeRuntimeHealthResponse(t, resp.Body.Bytes())
+}
+
+func waitForSchedulerRunningState(t *testing.T, app *runtimeApp, expected bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		running := app.scheduler != nil && app.scheduler.Running()
+		if running == expected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("scheduler running state did not reach %t", expected)
+}
+
 func readRuntimeConsoleResponse(t *testing.T, app *runtimeApp) runtimeConsoleResponse {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/console", nil)
@@ -221,12 +270,12 @@ func TestRuntimeCLINormalStartupInvokesHTTPServer(t *testing.T) {
 		if resp.Code != http.StatusOK {
 			t.Fatalf("expected healthz 200 before serve, got %d: %s", resp.Code, resp.Body.String())
 		}
-		var payload map[string]any
-		if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
-			t.Fatalf("decode healthz payload: %v", err)
-		}
-		if payload["status"] != "ok" {
+		payload := decodeRuntimeHealthResponse(t, resp.Body.Bytes())
+		if payload.Status != "ok" {
 			t.Fatalf("expected healthz status ok, got %+v", payload)
+		}
+		if payload.Components.Storage.Status != "ok" || payload.Components.Scheduler.Status != "ok" || !payload.Components.Scheduler.Running {
+			t.Fatalf("expected healthy startup health components, got %+v", payload)
 		}
 		return nil
 	})
@@ -239,6 +288,105 @@ func TestRuntimeCLINormalStartupInvokesHTTPServer(t *testing.T) {
 	if strings.TrimSpace(stderr.String()) != "" {
 		t.Fatalf("expected empty stderr for normal startup success, got %s", stderr.String())
 	}
+}
+
+func TestRuntimeAppHealthzReturnsStructuredHealthyStatus(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	waitForSchedulerRunningState(t, app, true)
+	statusCode, payload := readRuntimeHealthResponse(t, app)
+	if statusCode != http.StatusOK {
+		t.Fatalf("expected healthz 200, got %d: %+v", statusCode, payload)
+	}
+	if payload.Status != "ok" {
+		t.Fatalf("expected overall health ok, got %+v", payload)
+	}
+	if payload.Environment != "test" {
+		t.Fatalf("expected environment test, got %+v", payload)
+	}
+	if payload.SQLitePath == "" {
+		t.Fatalf("expected sqlite path in health payload, got %+v", payload)
+	}
+	if payload.SchedulerIntervalMs != 20 {
+		t.Fatalf("expected scheduler interval 20, got %+v", payload)
+	}
+	if payload.Components.Storage.Status != "ok" {
+		t.Fatalf("expected storage ok, got %+v", payload)
+	}
+	if payload.Components.Storage.Error != "" {
+		t.Fatalf("expected no storage error, got %+v", payload)
+	}
+	if payload.Components.Scheduler.Status != "ok" || !payload.Components.Scheduler.Running {
+		t.Fatalf("expected scheduler ok/running, got %+v", payload)
+	}
+}
+
+func TestRuntimeAppHealthzReturnsDegradedWhenSchedulerStops(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	waitForSchedulerRunningState(t, app, true)
+	app.schedulerCancel()
+	waitForSchedulerRunningState(t, app, false)
+
+	statusCode, payload := readRuntimeHealthResponse(t, app)
+	if statusCode != http.StatusOK {
+		t.Fatalf("expected healthz 200 for degraded runtime, got %d: %+v", statusCode, payload)
+	}
+	if payload.Status != "degraded" {
+		t.Fatalf("expected overall health degraded, got %+v", payload)
+	}
+	if payload.Components.Storage.Status != "ok" {
+		t.Fatalf("expected storage ok while degraded, got %+v", payload)
+	}
+	if payload.Components.Scheduler.Status != "degraded" || payload.Components.Scheduler.Running {
+		t.Fatalf("expected scheduler degraded/not running, got %+v", payload)
+	}
+}
+
+func TestRuntimeAppHealthzReturnsErrorWhenStorageProbeFails(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	waitForSchedulerRunningState(t, app, true)
+	if err := app.state.Close(); err != nil {
+		t.Fatalf("close sqlite state for failure probe: %v", err)
+	}
+
+	statusCode, payload := readRuntimeHealthResponse(t, app)
+	if statusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected healthz 503 on storage failure, got %d: %+v", statusCode, payload)
+	}
+	if payload.Status != "error" {
+		t.Fatalf("expected overall health error, got %+v", payload)
+	}
+	if payload.Components.Storage.Status != "error" {
+		t.Fatalf("expected storage error status, got %+v", payload)
+	}
+	if payload.Components.Storage.Error == "" {
+		t.Fatalf("expected storage error detail, got %+v", payload)
+	}
+	if payload.Components.Scheduler.Status != "ok" || !payload.Components.Scheduler.Running {
+		t.Fatalf("expected scheduler state to remain visible during storage failure, got %+v", payload)
+	}
+	app.state = nil
+	app.smokeStore = nil
 }
 
 func TestRuntimeAppDemoOneBotMessage(t *testing.T) {
