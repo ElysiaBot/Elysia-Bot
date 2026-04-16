@@ -11,23 +11,8 @@
 
 ## Active
 
-### B6. RBAC / operator action 统一
-- 目标：把“谁能执行什么动作”收口到统一权限模型。
-- 直接子步骤：
-  - 列出当前已经存在的 operator action，并先收口到一份最小动作清单。
-  - 先把 `plugin reload`、console 写操作、schedule/job 操作接入同一套权限判定入口。
-  - 固定动作命名规则，避免 API、内部逻辑、audit 文案使用不同 action 名。
-  - 明确 deny 时的返回格式，保证调用方能看到被拒绝原因而不是模糊失败。
-  - 保持 deny audit 结构一致，至少能看到操作者、动作、目标、拒绝原因、发生时间。
-  - 为最小角色或权限样例补测试，覆盖 allow、deny、缺失权限三类场景。
-  - 确保新增 action 不绕过统一检查入口，避免局部 if 判断继续扩散。
-
----
-
-## Backlog
-
 ### B7. secrets 进入主路径
-- 目标：让 secret 不只是局部配置，而是正式成为 plugin / provider / adapter 配置来源。
+- 目标：让 secret 正式成为 plugin / provider / adapter 的统一配置来源。
 - 直接子步骤：
   - 先定义 secret resolution 在配置装载链路中的固定入口，不让 plugin、provider、adapter 各自解析。
   - 明确 secret 引用格式和解析失败时机，区分“引用不存在”“格式非法”“来源不可用”。
@@ -36,6 +21,10 @@
   - 把 missing / invalid secret 错误做成 caller-facing 信息，至少能定位到哪个字段解析失败。
   - 补最小可观测字段，至少能看到 secret 来自哪个 source、是否解析成功，但不泄露 secret 实值。
   - 明确日志与读面里的脱敏规则，避免错误输出把 secret 内容打出来。
+
+---
+
+## Backlog
 
 ### B8. 告警 / 通知最小闭环
 - 目标：让关键故障不只存在日志里。
