@@ -3,10 +3,14 @@ package faultinjection
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	adapteronebot "github.com/ohmyopencode/bot-platform/adapters/adapter-onebot"
 	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
 	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 	runtimecore "github.com/ohmyopencode/bot-platform/packages/runtime-core"
@@ -19,10 +23,18 @@ type noopEventHandler struct{}
 
 type timeoutProviderStub struct{}
 
+type successProviderStub struct {
+	response string
+}
+
 type faultSessionRecorder struct{}
 
 type faultReplyRecorder struct {
 	text string
+}
+
+type oneBotReplyServiceBridge struct {
+	sender *adapteronebot.OneBotReplySender
 }
 
 type faultJobQueueStub struct {
@@ -54,6 +66,10 @@ func (timeoutProviderStub) Generate(ctx context.Context, prompt string) (string,
 	return "", errors.New("upstream timeout")
 }
 
+func (p successProviderStub) Generate(ctx context.Context, prompt string) (string, error) {
+	return p.response, nil
+}
+
 func (faultSessionRecorder) SaveSession(ctx context.Context, session pluginsdk.SessionState) error {
 	return nil
 }
@@ -68,6 +84,21 @@ func (r *faultReplyRecorder) ReplyImage(handle eventmodel.ReplyHandle, imageURL 
 }
 func (r *faultReplyRecorder) ReplyFile(handle eventmodel.ReplyHandle, fileURL string) error {
 	return nil
+}
+
+func (b oneBotReplyServiceBridge) ReplyText(handle eventmodel.ReplyHandle, text string) error {
+	_, err := b.sender.ReplyText(handle, text)
+	return err
+}
+
+func (b oneBotReplyServiceBridge) ReplyImage(handle eventmodel.ReplyHandle, imageURL string) error {
+	_, err := b.sender.ReplyImage(handle, imageURL)
+	return err
+}
+
+func (b oneBotReplyServiceBridge) ReplyFile(handle eventmodel.ReplyHandle, fileURL string) error {
+	_, err := b.sender.ReplyFile(handle, fileURL)
+	return err
 }
 
 func newFaultJobQueueStub() *faultJobQueueStub {
@@ -216,6 +247,61 @@ func TestFaultInjectionAIProviderTimeoutReturnsFailureFeedbackAndDeadLettersJob(
 	}
 	if stored.Status != pluginsdk.JobStatusDead || !stored.DeadLetter || stored.LastError != "upstream timeout" {
 		t.Fatalf("expected dead-lettered ai timeout job, got %+v", stored)
+	}
+}
+
+func TestFaultInjectionOneBotOutboundHTTPFailurePropagatesThroughAIJob(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream unavailable"))
+	}))
+	defer server.Close()
+
+	queue := newFaultJobQueueStub()
+	replies := oneBotReplyServiceBridge{
+		sender: adapteronebot.NewOneBotReplySender(adapteronebot.NewOneBotReplyHTTPTransport(server.URL, server.Client())),
+	}
+	plugin := pluginaichat.New(queue, successProviderStub{response: "ai response"}, faultSessionRecorder{}, replies)
+	job := pluginsdk.NewJob("job-ai-onebot-http-failure", "ai.chat", 1, 30*time.Second)
+	job.Payload = map[string]any{"prompt": "hello ai"}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue ai job: %v", err)
+	}
+
+	err := plugin.ProcessJob(context.Background(), job.ID, eventmodel.ReplyHandle{
+		Capability: "onebot.reply",
+		TargetID:   "group-42",
+		Metadata: map[string]any{
+			"message_type": "group",
+			"group_id":     int64(42),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected outbound onebot reply http failure to bubble through ai job path")
+	}
+
+	var httpErr *adapteronebot.OneBotReplyHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected classified onebot http transport error, got %T (%v)", err, err)
+	}
+	if !httpErr.GenericUpstreamFailure() || !httpErr.UpstreamFailure() {
+		t.Fatalf("expected 502 to retain upstream failure classification, got %+v", httpErr)
+	}
+	if httpErr.StatusCode != http.StatusBadGateway || httpErr.Body != "upstream unavailable" {
+		t.Fatalf("expected 502 body details to survive ai job path, got %+v", httpErr)
+	}
+
+	stored, inspectErr := queue.Inspect(context.Background(), job.ID)
+	if inspectErr != nil {
+		t.Fatalf("inspect ai job: %v", inspectErr)
+	}
+	if stored.Status != pluginsdk.JobStatusRetrying {
+		t.Fatalf("expected outbound reply failure to move ai job into retrying, got %+v", stored)
+	}
+	if !strings.Contains(stored.LastError, "502 Bad Gateway") || !strings.Contains(stored.LastError, "upstream unavailable") {
+		t.Fatalf("expected job last error to preserve outbound http failure detail, got %+v", stored)
 	}
 }
 
