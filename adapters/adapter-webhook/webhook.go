@@ -85,6 +85,13 @@ func (a *Adapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if expectedToken != "" && r.Header.Get("X-Webhook-Token") != expectedToken {
 		traceID := newWebhookID("trace")
 		a.recordAudit("webhook.reject.unauthorized", r.URL.Path, requestActor(r))
+		a.recordRejectObservability(
+			traceID,
+			"adapter.ingress.unauthorized.failure",
+			"webhook request rejected as unauthorized",
+			map[string]any{"path": r.URL.Path, "failure_code": webhookUnauthorizedCode, "failure_reason": webhookUnauthorizedCode},
+			map[string]any{"path": r.URL.Path, "failure_code": webhookUnauthorizedCode, "failure_reason": webhookUnauthorizedCode},
+		)
 		writeErrorJSON(w, http.StatusUnauthorized, webhookUnauthorizedCode, webhookUnauthorizedMessage, traceID)
 		return
 	}
@@ -93,6 +100,13 @@ func (a *Adapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		traceID := newWebhookID("trace")
 		a.recordAudit("webhook.reject.invalid_payload", r.URL.Path, requestActor(r))
+		a.recordRejectObservability(
+			traceID,
+			"adapter.ingress.invalid_payload.failure",
+			"webhook payload rejected as invalid",
+			map[string]any{"path": r.URL.Path, "failure_code": webhookInvalidPayloadCode, "failure_reason": webhookInvalidPayloadCode},
+			map[string]any{"path": r.URL.Path, "failure_code": webhookInvalidPayloadCode, "failure_reason": webhookInvalidPayloadCode, "error": err.Error()},
+		)
 		writeErrorJSON(w, http.StatusBadRequest, webhookInvalidPayloadCode, webhookInvalidPayloadMessage, traceID)
 		return
 	}
@@ -101,6 +115,13 @@ func (a *Adapter) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		traceID := newWebhookID("trace")
 		a.recordAudit("webhook.reject.invalid_event", payload.Source, payload.ActorID)
+		a.recordRejectObservability(
+			traceID,
+			"adapter.ingress.invalid_event.failure",
+			"webhook payload rejected as invalid event",
+			map[string]any{"path": r.URL.Path, "source": payload.Source, "type": payload.EventType, "failure_code": webhookInvalidEventCode, "failure_reason": webhookInvalidEventCode},
+			map[string]any{"path": r.URL.Path, "source": payload.Source, "type": payload.EventType, "failure_code": webhookInvalidEventCode, "failure_reason": webhookInvalidEventCode, "error": err.Error()},
+		)
 		writeErrorJSON(w, http.StatusBadRequest, webhookInvalidEventCode, err.Error(), traceID)
 		return
 	}
@@ -136,6 +157,19 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 
 func writeErrorJSON(w http.ResponseWriter, statusCode int, code, message, traceID string) {
 	writeJSON(w, statusCode, map[string]any{"status": "error", "code": code, "message": message, "trace_id": traceID})
+}
+
+func (a *Adapter) recordRejectObservability(traceID, spanName, message string, spanMetadata, logFields map[string]any) {
+	if a == nil {
+		return
+	}
+	if a.Tracer != nil {
+		finishFailureSpan := a.Tracer.StartSpan(traceID, spanName, "", "", "", "", spanMetadata)
+		finishFailureSpan()
+	}
+	if a.Logger != nil {
+		_ = a.Logger.Log("error", message, runtimecore.LogContext{TraceID: traceID}, logFields)
+	}
 }
 
 func (a *Adapter) expectedToken(ctx context.Context) (string, error) {

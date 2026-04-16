@@ -66,7 +66,10 @@ func TestWebhookAdapterRejectsUnauthorizedRequest(t *testing.T) {
 	t.Parallel()
 
 	audits := &auditRecorder{}
-	adapter := New("secret", &recordingDispatcher{}, runtimecore.NewLogger(&bytes.Buffer{}), audits)
+	logs := &bytes.Buffer{}
+	tracer := runtimecore.NewTraceRecorder()
+	adapter := New("secret", &recordingDispatcher{}, runtimecore.NewLogger(logs), audits)
+	adapter.Tracer = tracer
 	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBufferString(`{"event_type":"webhook.received","source":"webhook"}`))
 	request.RemoteAddr = "127.0.0.1:9999"
 	recorder := httptest.NewRecorder()
@@ -96,13 +99,17 @@ func TestWebhookAdapterRejectsUnauthorizedRequest(t *testing.T) {
 	if len(audits.entries) != 1 || audits.entries[0].Action != "webhook.reject.unauthorized" || audits.entries[0].Actor != "127.0.0.1:9999" || audits.entries[0].Allowed || audits.entries[0].Reason != "webhook_unauthorized" {
 		t.Fatalf("unexpected audit entries %+v", audits.entries)
 	}
+	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.unauthorized.failure", "webhook request rejected as unauthorized", webhookUnauthorizedCode, webhookUnauthorizedCode)
 }
 
-func TestWebhookAdapterReturnsBadRequestForInvalidPayload(t *testing.T) {
+func TestWebhookAdapterRejectsInvalidEventPayload(t *testing.T) {
 	t.Parallel()
 
 	audits := &auditRecorder{}
-	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(&bytes.Buffer{}), audits)
+	logs := &bytes.Buffer{}
+	tracer := runtimecore.NewTraceRecorder()
+	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(logs), audits)
+	adapter.Tracer = tracer
 	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBufferString(`{"source":"webhook"}`))
 	recorder := httptest.NewRecorder()
 
@@ -131,13 +138,17 @@ func TestWebhookAdapterReturnsBadRequestForInvalidPayload(t *testing.T) {
 	if len(audits.entries) != 1 || audits.entries[0].Action != "webhook.reject.invalid_event" || audits.entries[0].Target != "webhook" || audits.entries[0].Allowed || audits.entries[0].Reason != "webhook_invalid_event" {
 		t.Fatalf("unexpected audit entries %+v", audits.entries)
 	}
+	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.invalid_event.failure", "webhook payload rejected as invalid event", webhookInvalidEventCode, webhookInvalidEventCode)
 }
 
 func TestWebhookAdapterAuditsMalformedPayload(t *testing.T) {
 	t.Parallel()
 
 	audits := &auditRecorder{}
-	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(&bytes.Buffer{}), audits)
+	logs := &bytes.Buffer{}
+	tracer := runtimecore.NewTraceRecorder()
+	adapter := New("", &recordingDispatcher{}, runtimecore.NewLogger(logs), audits)
+	adapter.Tracer = tracer
 	request := httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewBufferString(`{"event_type":`))
 	request.RemoteAddr = "10.0.0.8:8080"
 	recorder := httptest.NewRecorder()
@@ -167,6 +178,7 @@ func TestWebhookAdapterAuditsMalformedPayload(t *testing.T) {
 	if len(audits.entries) != 1 || audits.entries[0].Action != "webhook.reject.invalid_payload" || audits.entries[0].Actor != "10.0.0.8:8080" || audits.entries[0].Allowed || audits.entries[0].Reason != "webhook_invalid_payload" {
 		t.Fatalf("unexpected audit entries %+v", audits.entries)
 	}
+	assertRejectObservability(t, logs, tracer, traceID, "adapter.ingress.invalid_payload.failure", "webhook payload rejected as invalid", webhookInvalidPayloadCode, webhookInvalidPayloadCode)
 }
 
 func TestWebhookAdapterResponseContainsEventIDs(t *testing.T) {
@@ -544,4 +556,54 @@ func TestWebhookAdapterRejectsInvalidSecretRefSafely(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("expected constructor-time invalid secret ref to avoid runtime audit entries, got %+v", entries)
 	}
+}
+
+func assertRejectObservability(t *testing.T, logs *bytes.Buffer, tracer *runtimecore.TraceRecorder, traceID, spanName, logMessage, failureCode, failureReason string) {
+	t.Helper()
+
+	entries := decodeLogEntries(t, logs)
+	if len(entries) != 1 {
+		t.Fatalf("expected one reject log entry, got %+v", entries)
+	}
+	entry := entries[0]
+	if entry.TraceID != traceID || entry.Message != logMessage || entry.Level != "error" {
+		t.Fatalf("expected reject log to match trace/message/level, got %+v", entry)
+	}
+	if entry.Fields["failure_code"] != failureCode || entry.Fields["failure_reason"] != failureReason {
+		t.Fatalf("expected reject log fields to preserve stable failure metadata, got %+v", entry)
+	}
+
+	trace := tracer.RenderTrace(traceID)
+	if !strings.Contains(trace, spanName) {
+		t.Fatalf("expected rendered trace to include %s, got %s", spanName, trace)
+	}
+	spans := tracer.SpansByTrace(traceID)
+	if len(spans) != 1 {
+		t.Fatalf("expected one reject span, got %+v", spans)
+	}
+	if spans[0].SpanName != spanName || spans[0].Metadata["failure_code"] != failureCode || spans[0].Metadata["failure_reason"] != failureReason {
+		t.Fatalf("expected reject span metadata to match trace_id-backed failure evidence, got %+v", spans)
+	}
+}
+
+func decodeLogEntries(t *testing.T, logs *bytes.Buffer) []runtimecore.LogEntry {
+	t.Helper()
+
+	raw := strings.TrimSpace(logs.String())
+	if raw == "" {
+		t.Fatalf("expected reject log output")
+	}
+	lines := strings.Split(raw, "\n")
+	entries := make([]runtimecore.LogEntry, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry runtimecore.LogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log entry %q: %v", line, err)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
