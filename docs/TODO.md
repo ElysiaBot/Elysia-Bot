@@ -12,13 +12,13 @@
 
 ## Active
 
-### B1. 多平台 / adapter 实例管理边界
-- 目标：让 adapter 不只是“代码里能接”，而是“平台里可管理”。
-- 子任务方向：
-  - adapter 实例配置模型
-  - adapter 连接状态读面
-  - 多 bot / 多账号状态聚合
-  - health/readiness 聚合到 adapter 级别
+### B2. bot / adapter / plugin 生命周期状态页
+- 目标：形成成熟机器人项目常见的统一运行状态面。
+- 最小关注项：
+  - bot 是否在线
+  - adapter 是否健康
+  - plugin 是否启用
+  - 最近一次失败原因 / 时间
 
 ---
 
@@ -27,14 +27,6 @@
 ---
 
 ## Backlog
-
-### B2. bot / adapter / plugin 生命周期状态页
-- 目标：形成成熟机器人项目常见的统一运行状态面。
-- 最小关注项：
-  - bot 是否在线
-  - adapter 是否健康
-  - plugin 是否启用
-  - 最近一次失败原因 / 时间
 
 ### B3. 插件开发者入口标准化
 - 目标：把 `plugin-template-smoke` 提升为正式开发入口。
