@@ -11,8 +11,19 @@ const basePlugin = {
   entry: { module: 'plugins/plugin-echo' },
 };
 
+const baseAdapter = {
+  id: 'adapter-onebot-demo',
+  adapter: 'onebot',
+  source: 'onebot',
+  status: 'registered',
+  health: 'ready',
+  online: true,
+  statePersisted: true,
+};
+
 const basePayload = {
   status: { adapters: 1, plugins: 1, jobs: 1, schedules: 1 },
+  adapters: [baseAdapter],
   plugins: [basePlugin],
   jobs: [
     {
@@ -64,6 +75,24 @@ const basePayload = {
 };
 
 describe('parseConsolePayload', () => {
+  it('accepts adapter updatedAt when it is a string timestamp', () => {
+    const parsed = parseConsolePayload({
+      ...basePayload,
+      adapters: [{ ...baseAdapter, updatedAt: '2026-04-05T23:59:00Z' }],
+    });
+
+    expect(parsed.adapters[0]?.updatedAt).toBe('2026-04-05T23:59:00Z');
+  });
+
+  it('rejects adapter updatedAt when it is not a string', () => {
+    expect(() =>
+      parseConsolePayload({
+        ...basePayload,
+        adapters: [{ ...baseAdapter, updatedAt: 123 }],
+      }),
+    ).toThrow('Console API payload shape is incompatible with Console Web v0');
+  });
+
   it('accepts plugin lastDispatchAt when it is a string timestamp', () => {
     const parsed = parseConsolePayload({
       ...basePayload,

@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { buildConsoleRequestURL, getConsoleApiURL } from './consoleApiClient';
 import { parseConsolePayload } from './consolePayload';
-import type { ConsolePayload, Job, PluginManifest, Schedule } from './types';
+import type { AdapterInstance, ConsolePayload, Job, PluginManifest, Schedule } from './types';
 
 const consoleApiURL = getConsoleApiURL();
 
@@ -111,6 +111,49 @@ function SectionCard(props: { title: string; description: string; children: Reac
       {children}
     </section>
   );
+}
+
+function AdapterTable({ adapters }: { adapters: AdapterInstance[] }) {
+	return (
+		<div className="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>ID</th>
+						<th>Adapter / Source</th>
+						<th>Status</th>
+						<th>Health</th>
+						<th>Online</th>
+						<th>Updated At</th>
+						<th>Summary</th>
+					</tr>
+				</thead>
+				<tbody>
+					{adapters.map((adapter) => (
+						<tr key={adapter.id}>
+							<td>
+								<div className="cell-title">{adapter.id}</div>
+								<div className="cell-subtitle">{adapter.statePersisted ? 'persisted adapter lifecycle facts' : 'runtime-only adapter lifecycle facts'}</div>
+							</td>
+							<td>
+								<div className="cell-title">{adapter.adapter} / {adapter.source}</div>
+								<div className="cell-subtitle">{adapter.statusSource ?? 'status source unavailable'}</div>
+							</td>
+							<td>{adapter.status ?? '—'}</td>
+							<td>{adapter.health ?? '—'}</td>
+							<td>
+								<span className={`badge ${adapter.online ? 'badge-done' : 'badge-dead'}`}>
+									{adapter.online ? 'online' : 'offline'}
+								</span>
+							</td>
+							<td>{adapter.updatedAt ?? '—'}</td>
+							<td>{adapter.summary ?? '—'}</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	);
 }
 
 function PluginTable(props: {
@@ -528,9 +571,20 @@ function App() {
 			<pre className="config-viewer">{JSON.stringify(data.observability.verificationEndpoints ?? [], null, 2)}</pre>
 		</SectionCard>
 
+		<SectionCard
+			title="Adapter lifecycle"
+			description="Read-only adapter registration and health facts already present in /api/console.adapters[], shown alongside plugin lifecycle state."
+		>
+			{data.adapters.length === 0 ? (
+				<div className="empty-state">No adapter lifecycle facts available yet.</div>
+			) : (
+				<AdapterTable adapters={data.adapters} />
+			)}
+		</SectionCard>
+
       <SectionCard
-        title="Plugin list"
-        description="Read-only manifest view aligned to the current PluginManifest JSON shape, with optional single-plugin evidence lookup."
+			title="Plugin lifecycle"
+			description="Read-only plugin lifecycle view aligned to the current PluginManifest JSON shape, with optional single-plugin evidence lookup."
       >
         <div className="plugin-attention-toolbar">
           <div className="plugin-attention-summary" aria-live="polite">

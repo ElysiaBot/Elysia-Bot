@@ -34,6 +34,26 @@ function hasJobShape(value: unknown): boolean {
   );
 }
 
+function hasAdapterShape(value: unknown): boolean {
+	if (!isRecord(value)) {
+		return false;
+	}
+	return (
+		isString(value.id) &&
+		isString(value.adapter) &&
+		isString(value.source) &&
+		(value.config === undefined || isRecord(value.config)) &&
+		(value.status === undefined || isString(value.status)) &&
+		(value.health === undefined || isString(value.health)) &&
+		typeof value.online === 'boolean' &&
+		(value.statusSource === undefined || isString(value.statusSource)) &&
+		(value.configSource === undefined || isString(value.configSource)) &&
+		typeof value.statePersisted === 'boolean' &&
+		(value.updatedAt === undefined || isString(value.updatedAt)) &&
+		(value.summary === undefined || isString(value.summary))
+	);
+}
+
 function hasPluginShape(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.entry)) {
     return false;
@@ -90,6 +110,8 @@ export function isConsolePayload(value: unknown): value is ConsolePayload {
     isNumber(value.status.plugins) &&
     isNumber(value.status.jobs) &&
     isNumber(value.status.schedules) &&
+		Array.isArray(value.adapters) &&
+		value.adapters.every(hasAdapterShape) &&
     Array.isArray(value.plugins) &&
     value.plugins.every(hasPluginShape) &&
 		Array.isArray(value.jobs) &&

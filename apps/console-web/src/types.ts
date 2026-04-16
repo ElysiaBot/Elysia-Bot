@@ -5,6 +5,21 @@ export type RuntimeStatus = {
   schedules: number;
 };
 
+export type AdapterInstance = {
+  id: string;
+  adapter: string;
+  source: string;
+  config?: Record<string, unknown>;
+  status?: string;
+  health?: string;
+  online: boolean;
+  statusSource?: string;
+  configSource?: string;
+  statePersisted: boolean;
+  updatedAt?: string;
+  summary?: string;
+};
+
 export type PluginEntry = {
   module?: string;
   symbol?: string;
@@ -112,6 +127,7 @@ export type ConsoleObservability = {
 
 export type ConsolePayload = {
   status: RuntimeStatus;
+  adapters: AdapterInstance[];
   plugins: PluginManifest[];
   jobs: Job[];
   schedules: Schedule[];

@@ -4,6 +4,21 @@ import App from './App';
 
 const consolePayload = {
   status: { adapters: 1, plugins: 2, jobs: 1, schedules: 1 },
+  adapters: [
+    {
+      id: 'adapter-onebot-demo',
+      adapter: 'onebot',
+      source: 'onebot',
+      status: 'registered',
+      health: 'ready',
+      online: true,
+      statusSource: 'sqlite-adapter-instances',
+      configSource: 'runtime-bootstrap',
+      statePersisted: true,
+      updatedAt: '2026-04-06T00:00:00Z',
+      summary: 'registered adapter lifecycle facts from sqlite-adapter-instances',
+    },
+  ],
   plugins: [
     {
       id: 'plugin-echo',
@@ -142,6 +157,17 @@ describe('App', () => {
 
     await screen.findByText('Read-only operations panel');
 
+    expect(screen.getByRole('heading', { name: 'Adapter lifecycle' })).toBeInTheDocument();
+    const adapterRow = screen.getByText('adapter-onebot-demo').closest('tr');
+    expect(adapterRow).not.toBeNull();
+    expect(within(adapterRow as HTMLTableRowElement).getByText('onebot / onebot')).toBeInTheDocument();
+    expect(within(adapterRow as HTMLTableRowElement).getByText('registered')).toBeInTheDocument();
+    expect(within(adapterRow as HTMLTableRowElement).getByText('ready')).toBeInTheDocument();
+    expect(within(adapterRow as HTMLTableRowElement).getByText('online')).toBeInTheDocument();
+    expect(within(adapterRow as HTMLTableRowElement).getByText('2026-04-06T00:00:00Z')).toBeInTheDocument();
+    expect(
+      within(adapterRow as HTMLTableRowElement).getByText('registered adapter lifecycle facts from sqlite-adapter-instances'),
+    ).toBeInTheDocument();
     expect(screen.getByText('Echo Plugin')).toBeInTheDocument();
     expect(screen.getByText('event failed')).toBeInTheDocument();
     expect(screen.getByText('last dispatch at: 2026-04-05T23:59:00Z')).toBeInTheDocument();
@@ -164,10 +190,11 @@ describe('App', () => {
     expect(screen.getByText('Schedule list')).toBeInTheDocument();
     expect(screen.getByText('Async observability')).toBeInTheDocument();
     expect(screen.getByText('schedule-console')).toBeInTheDocument();
-    expect(screen.getByText('registered')).toBeInTheDocument();
     expect(screen.getByText('Jobs dispatch-ready')).toBeInTheDocument();
     expect(screen.getByText('runtime-metrics-registry')).toBeInTheDocument();
-    expect(screen.getByText('ready')).toBeInTheDocument();
+    const jobRow = screen.getByText('job-console').closest('tr');
+    expect(jobRow).not.toBeNull();
+    expect(within(jobRow as HTMLTableRowElement).getByText('ready')).toBeInTheDocument();
     expect(screen.getByLabelText('Log filter')).toHaveDisplayValue('plugin-echo');
     expect(screen.getByLabelText('Job filter')).toHaveDisplayValue('ai.call');
     expect(screen.getByLabelText('Plugin ID')).toHaveDisplayValue('plugin-echo');

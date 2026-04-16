@@ -225,6 +225,17 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), `"generated_at":`) {
 		t.Fatalf("expected console payload to include generated_at timestamp, got %s", resp.Body.String())
 	}
+	pluginLifecycleReq := httptest.NewRequest(http.MethodGet, "/api/console?plugin_id=plugin-admin", nil)
+	pluginLifecycleResp := httptest.NewRecorder()
+	app.ServeHTTP(pluginLifecycleResp, pluginLifecycleReq)
+	if pluginLifecycleResp.Code != http.StatusOK {
+		t.Fatalf("expected filtered plugin lifecycle console 200, got %d: %s", pluginLifecycleResp.Code, pluginLifecycleResp.Body.String())
+	}
+	for _, expected := range []string{`"id": "plugin-admin"`, `"statusLevel": "registered"`, `"statusRecovery": "no-runtime-evidence"`, `"statusStaleness": "static-registration"`} {
+		if !strings.Contains(pluginLifecycleResp.Body.String(), expected) {
+			t.Fatalf("expected filtered plugin lifecycle payload to include %s, got %s", expected, pluginLifecycleResp.Body.String())
+		}
+	}
 }
 
 func TestRuntimeAppOperatorDisablePersistsOverlaySkipsDispatchAndReEnables(t *testing.T) {
