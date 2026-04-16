@@ -553,6 +553,87 @@ func TestRuntimeAppJobTimeoutTransitionsFromPending(t *testing.T) {
 	}
 }
 
+func TestRuntimeAppDeadLetterAlertAppearsInConsole(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	enqueueReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-alert-console","correlation_id":"corr-alert-console","max_retries":0}`))
+	enqueueReq.Header.Set("Content-Type", "application/json")
+	enqueueResp := httptest.NewRecorder()
+	app.ServeHTTP(enqueueResp, enqueueReq)
+	if enqueueResp.Code != http.StatusOK {
+		t.Fatalf("expected enqueue 200, got %d: %s", enqueueResp.Code, enqueueResp.Body.String())
+	}
+
+	timeoutReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/timeout?id=job-alert-console", nil)
+	timeoutResp := httptest.NewRecorder()
+	app.ServeHTTP(timeoutResp, timeoutReq)
+	if timeoutResp.Code != http.StatusOK {
+		t.Fatalf("expected timeout 200, got %d: %s", timeoutResp.Code, timeoutResp.Body.String())
+	}
+	if !strings.Contains(timeoutResp.Body.String(), `"status":"dead"`) || !strings.Contains(timeoutResp.Body.String(), `"deadLetter":true`) {
+		t.Fatalf("expected timeout endpoint to dead-letter demo job, got %s", timeoutResp.Body.String())
+	}
+
+	consoleReq := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	consoleResp := httptest.NewRecorder()
+	app.ServeHTTP(consoleResp, consoleReq)
+	if consoleResp.Code != http.StatusOK {
+		t.Fatalf("expected console 200, got %d: %s", consoleResp.Code, consoleResp.Body.String())
+	}
+	var payload struct {
+		Jobs []struct {
+			ID         string `json:"id"`
+			Status     string `json:"status"`
+			DeadLetter bool   `json:"deadLetter"`
+		} `json:"jobs"`
+		Alerts []struct {
+			ID               string `json:"id"`
+			ObjectID         string `json:"objectId"`
+			FailureType      string `json:"failureType"`
+			LatestReason     string `json:"latestReason"`
+			Correlation      string `json:"correlation"`
+			FirstOccurredAt  string `json:"firstOccurredAt"`
+			LatestOccurredAt string `json:"latestOccurredAt"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(consoleResp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode console payload: %v", err)
+	}
+	jobVisible := false
+	for _, job := range payload.Jobs {
+		if job.ID == "job-alert-console" && job.Status == "dead" && job.DeadLetter {
+			jobVisible = true
+			break
+		}
+	}
+	if !jobVisible {
+		t.Fatalf("expected dead-letter job to remain visible in /api/console, got %+v", payload.Jobs)
+	}
+	if len(payload.Alerts) != 1 {
+		t.Fatalf("expected one dead-letter alert in console payload, got %+v", payload.Alerts)
+	}
+	alert := payload.Alerts[0]
+	if alert.ObjectID != "job-alert-console" || alert.FailureType != "job.dead_letter" || alert.LatestReason != "timeout" || alert.Correlation != "corr-alert-console" {
+		t.Fatalf("expected minimal dead-letter alert payload in console response, got %+v", alert)
+	}
+	if alert.FirstOccurredAt == "" || alert.LatestOccurredAt == "" {
+		t.Fatalf("expected dead-letter alert timestamps in console response, got %+v", alert)
+	}
+	counts, err := app.state.Counts(t.Context())
+	if err != nil {
+		t.Fatalf("sqlite counts: %v", err)
+	}
+	if counts["alerts"] != 1 {
+		t.Fatalf("expected one persisted alert row after demo dead-letter flow, got %+v", counts)
+	}
+}
+
 func TestRuntimeAppDelayScheduleTriggersEchoReply(t *testing.T) {
 	t.Parallel()
 

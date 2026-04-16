@@ -245,6 +245,7 @@ func newRuntimeApp(configPath string) (*runtimeApp, error) {
 		return nil, fmt.Errorf("open sqlite state store: %w", err)
 	}
 	queue.SetStore(state)
+	queue.SetAlertSink(state)
 	if err := queue.Restore(context.Background()); err != nil {
 		_ = state.Close()
 		return nil, fmt.Errorf("restore job queue: %w", err)
@@ -419,6 +420,7 @@ func (a *runtimeApp) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	console := runtimecore.NewConsoleAPI(a.runtimeRaw, a.queue, a.config, a.logs.Lines(), a.audits)
 	console.SetJobReader(runtimecore.NewSQLiteConsoleJobReader(a.state))
+	console.SetAlertReader(runtimecore.NewSQLiteConsoleAlertReader(a.state))
 	console.SetScheduleReader(runtimecore.NewSQLiteConsoleScheduleReader(a.state))
 	console.SetAdapterInstanceReader(runtimecore.NewSQLiteConsoleAdapterInstanceReader(a.state))
 	console.SetPluginSnapshotReader(runtimecore.NewSQLiteConsolePluginSnapshotReader(a.state))
@@ -608,6 +610,7 @@ func (a *runtimeApp) handleJobEnqueue(w http.ResponseWriter, r *http.Request) {
 		ID            string `json:"id"`
 		Type          string `json:"type"`
 		CorrelationID string `json:"correlation_id"`
+		MaxRetries    *int   `json:"max_retries"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 	if strings.TrimSpace(payload.ID) == "" {
@@ -616,7 +619,11 @@ func (a *runtimeApp) handleJobEnqueue(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(payload.Type) == "" {
 		payload.Type = "demo.echo"
 	}
-	job := runtimecore.NewJob(payload.ID, payload.Type, 2, 30*time.Second)
+	maxRetries := 2
+	if payload.MaxRetries != nil {
+		maxRetries = *payload.MaxRetries
+	}
+	job := runtimecore.NewJob(payload.ID, payload.Type, maxRetries, 30*time.Second)
 	job.Correlation = payload.CorrelationID
 	if err := a.queue.Enqueue(r.Context(), job); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

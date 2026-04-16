@@ -81,7 +81,7 @@ func TestSQLiteStateStorePersistsCoreMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts: %v", err)
 	}
-	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["alerts"] != 0 || counts["schedule_plans"] != 1 {
 		t.Fatalf("unexpected counts: %+v", counts)
 	}
 }
@@ -206,7 +206,7 @@ func TestSQLiteStateStoreRetainsMetadataAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts after reopen: %v", err)
 	}
-	if counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["schedule_plans"] != 1 {
+	if counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["alerts"] != 0 || counts["schedule_plans"] != 1 {
 		t.Fatalf("expected persisted metadata after reopen, got %+v", counts)
 	}
 }
@@ -565,6 +565,60 @@ func TestSQLiteStateStoreRetainsJobsAcrossReopen(t *testing.T) {
 	}
 	if loaded.ID != job.ID || loaded.Status != JobStatusPending || loaded.TraceID != job.TraceID {
 		t.Fatalf("expected job after reopen, got %+v", loaded)
+	}
+}
+
+func TestSQLiteStateStorePersistsDeadLetterAlertsAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	finishedAt := time.Date(2026, 4, 7, 10, 15, 0, 0, time.UTC)
+	job := NewJob("job-alert-reopen", "demo.echo", 0, 10*time.Second)
+	job.Status = JobStatusDead
+	job.LastError = "timeout"
+	job.DeadLetter = true
+	job.TraceID = "trace-alert-reopen"
+	job.EventID = "evt-alert-reopen"
+	job.RunID = "run-alert-reopen"
+	job.Correlation = "corr-alert-reopen"
+	job.FinishedAt = &finishedAt
+	if err := store.RecordAlert(context.Background(), jobDeadLetterAlert(job)); err != nil {
+		t.Fatalf("record alert: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	alerts, err := reopened.ListAlerts(context.Background())
+	if err != nil {
+		t.Fatalf("list alerts after reopen: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected one alert after reopen, got %+v", alerts)
+	}
+	alert := alerts[0]
+	if alert.ObjectID != job.ID || alert.FailureType != alertFailureTypeJobDeadLetter || alert.LatestReason != job.LastError {
+		t.Fatalf("expected persisted alert payload after reopen, got %+v", alert)
+	}
+	if !alert.FirstOccurredAt.Equal(finishedAt) || !alert.LatestOccurredAt.Equal(finishedAt) {
+		t.Fatalf("expected persisted alert timestamps after reopen, got %+v", alert)
+	}
+	counts, err := reopened.Counts(context.Background())
+	if err != nil {
+		t.Fatalf("counts after alert reopen: %v", err)
+	}
+	if counts["alerts"] != 1 {
+		t.Fatalf("expected one persisted alert row, got %+v", counts)
 	}
 }
 

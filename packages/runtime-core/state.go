@@ -103,6 +103,21 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS alerts (
+  alert_id TEXT PRIMARY KEY,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  failure_type TEXT NOT NULL,
+  first_occurred_at TEXT NOT NULL,
+  latest_occurred_at TEXT NOT NULL,
+  latest_reason TEXT NOT NULL,
+  trace_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  correlation TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schedule_plans (
   schedule_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -579,7 +594,18 @@ VALUES (?, ?, ?)
 	return nil
 }
 
+type sqliteExecContexter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 func (s *SQLiteStateStore) SaveJob(ctx context.Context, job Job) error {
+	if err := saveJobWithExecutor(ctx, s.db, job); err != nil {
+		return err
+	}
+	return nil
+}
+
+func saveJobWithExecutor(ctx context.Context, executor sqliteExecContexter, job Job) error {
 	if err := job.Validate(); err != nil {
 		return fmt.Errorf("validate job: %w", err)
 	}
@@ -589,7 +615,7 @@ func (s *SQLiteStateStore) SaveJob(ctx context.Context, job Job) error {
 		return fmt.Errorf("marshal job payload: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = executor.ExecContext(ctx, `
 INSERT INTO jobs (
   job_id, job_type, status, payload_json, retry_count, max_retries, timeout_ms, last_error,
   created_at, started_at, finished_at, next_run_at, dead_letter, trace_id, event_id, run_id,
@@ -619,6 +645,52 @@ ON CONFLICT(job_id) DO UPDATE SET
 		job.TraceID, job.EventID, job.RunID, job.Correlation, formatSQLiteTimestamp(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("upsert job: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStateStore) RecordAlert(ctx context.Context, alert AlertRecord) error {
+	if err := saveAlertWithExecutor(ctx, s.db, alert); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SQLiteStateStore) PersistJobDeadLetter(ctx context.Context, job Job, alert AlertRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin dead-letter persistence transaction: %w", err)
+	}
+	if err := saveJobWithExecutor(ctx, tx, job); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := saveAlertWithExecutor(ctx, tx, alert); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit dead-letter persistence transaction: %w", err)
+	}
+	return nil
+}
+
+func saveAlertWithExecutor(ctx context.Context, executor sqliteExecContexter, alert AlertRecord) error {
+	normalized, err := normalizeAlertRecord(alert)
+	if err != nil {
+		return fmt.Errorf("validate alert: %w", err)
+	}
+	_, err = executor.ExecContext(ctx, `
+INSERT OR IGNORE INTO alerts (
+  alert_id, object_type, object_id, failure_type, first_occurred_at, latest_occurred_at,
+  latest_reason, trace_id, event_id, run_id, correlation, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, normalized.ID, normalized.ObjectType, normalized.ObjectID, normalized.FailureType,
+		formatSQLiteTimestamp(normalized.FirstOccurredAt), formatSQLiteTimestamp(normalized.LatestOccurredAt), normalized.LatestReason,
+		normalized.TraceID, normalized.EventID, normalized.RunID, normalized.Correlation, formatSQLiteTimestamp(normalized.CreatedAt))
+	if err != nil {
+		return fmt.Errorf("insert alert: %w", err)
 	}
 	return nil
 }
@@ -659,6 +731,20 @@ ORDER BY created_at ASC, job_id ASC
 	}
 	defer rows.Close()
 	return scanJobs(rows)
+}
+
+func (s *SQLiteStateStore) ListAlerts(ctx context.Context) ([]AlertRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT alert_id, object_type, object_id, failure_type, first_occurred_at, latest_occurred_at,
+       latest_reason, trace_id, event_id, run_id, correlation, created_at
+FROM alerts
+ORDER BY latest_occurred_at DESC, alert_id ASC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list alerts: %w", err)
+	}
+	defer rows.Close()
+	return scanAlerts(rows)
 }
 
 func (s *SQLiteStateStore) SaveSchedulePlan(ctx context.Context, stored storedSchedulePlan) error {
@@ -777,6 +863,7 @@ func (s *SQLiteStateStore) Counts(ctx context.Context) (map[string]int, error) {
 		"sessions":                `SELECT COUNT(*) FROM sessions`,
 		"idempotency_keys":        `SELECT COUNT(*) FROM idempotency_keys`,
 		"jobs":                    `SELECT COUNT(*) FROM jobs`,
+		"alerts":                  `SELECT COUNT(*) FROM alerts`,
 		"schedule_plans":          `SELECT COUNT(*) FROM schedule_plans`,
 	}
 
@@ -1065,6 +1152,54 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		return nil, fmt.Errorf("iterate jobs: %w", err)
 	}
 	return jobs, nil
+}
+
+func scanAlerts(rows *sql.Rows) ([]AlertRecord, error) {
+	alerts := make([]AlertRecord, 0)
+	for rows.Next() {
+		var (
+			alert               AlertRecord
+			firstOccurredAtRaw  string
+			latestOccurredAtRaw string
+			createdAtRaw        string
+		)
+		if err := rows.Scan(
+			&alert.ID,
+			&alert.ObjectType,
+			&alert.ObjectID,
+			&alert.FailureType,
+			&firstOccurredAtRaw,
+			&latestOccurredAtRaw,
+			&alert.LatestReason,
+			&alert.TraceID,
+			&alert.EventID,
+			&alert.RunID,
+			&alert.Correlation,
+			&createdAtRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan alert: %w", err)
+		}
+		firstOccurredAt, err := parseSQLiteTimestamp(firstOccurredAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert first_occurred_at: %w", err)
+		}
+		latestOccurredAt, err := parseSQLiteTimestamp(latestOccurredAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert latest_occurred_at: %w", err)
+		}
+		createdAt, err := parseSQLiteTimestamp(createdAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse alert created_at: %w", err)
+		}
+		alert.FirstOccurredAt = firstOccurredAt
+		alert.LatestOccurredAt = latestOccurredAt
+		alert.CreatedAt = createdAt
+		alerts = append(alerts, alert)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate alerts: %w", err)
+	}
+	return alerts, nil
 }
 
 func formatSQLiteTimestamp(value time.Time) string {

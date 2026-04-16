@@ -17,6 +17,7 @@ type ConsoleAPI struct {
 	runtime          *InMemoryRuntime
 	queue            *JobQueue
 	jobs             consoleJobReader
+	alerts           consoleAlertReader
 	schedules        consoleScheduleReader
 	adapterInstances consoleAdapterInstanceReader
 	pluginSnapshots  consolePluginSnapshotReader
@@ -76,6 +77,10 @@ type ConsoleAdapterInstance struct {
 
 type consoleJobReader interface {
 	ListJobs() ([]Job, error)
+}
+
+type consoleAlertReader interface {
+	ListAlerts() ([]AlertRecord, error)
 }
 
 type ConsoleJob struct {
@@ -222,6 +227,10 @@ type sqliteConsoleJobReader struct {
 	store *SQLiteStateStore
 }
 
+type sqliteConsoleAlertReader struct {
+	store *SQLiteStateStore
+}
+
 type RuntimeStatus struct {
 	Adapters  int `json:"adapters"`
 	Plugins   int `json:"plugins"`
@@ -238,6 +247,13 @@ func NewSQLiteConsoleJobReader(store *SQLiteStateStore) consoleJobReader {
 		return nil
 	}
 	return sqliteConsoleJobReader{store: store}
+}
+
+func NewSQLiteConsoleAlertReader(store *SQLiteStateStore) consoleAlertReader {
+	if store == nil {
+		return nil
+	}
+	return sqliteConsoleAlertReader{store: store}
 }
 
 func NewSQLiteConsoleScheduleReader(store *SQLiteStateStore) consoleScheduleReader {
@@ -286,6 +302,10 @@ func (c *ConsoleAPI) SetPluginEnabledStateReader(reader consolePluginEnabledStat
 
 func (c *ConsoleAPI) SetJobReader(reader consoleJobReader) {
 	c.jobs = reader
+}
+
+func (c *ConsoleAPI) SetAlertReader(reader consoleAlertReader) {
+	c.alerts = reader
 }
 
 func (c *ConsoleAPI) SetRecoverySource(source consoleRecoverySource) {
@@ -756,6 +776,17 @@ func (c *ConsoleAPI) Logs(query string) []string {
 	return filtered
 }
 
+func (c *ConsoleAPI) Alerts() ([]AlertRecord, error) {
+	if c.alerts == nil {
+		return nil, nil
+	}
+	alerts, err := c.alerts.ListAlerts()
+	if err != nil {
+		return nil, fmt.Errorf("load console alerts: %w", err)
+	}
+	return alerts, nil
+}
+
 func (c *ConsoleAPI) Audits() []pluginsdk.AuditEntry {
 	if c.audits == nil {
 		return nil
@@ -806,6 +837,10 @@ func (c *ConsoleAPI) renderJSONWithFilters(logQuery, jobQuery, pluginID string) 
 	if err != nil {
 		return "", err
 	}
+	alerts, err := c.Alerts()
+	if err != nil {
+		return "", err
+	}
 	jobs, err := c.FilteredJobs(jobQuery)
 	if err != nil {
 		return "", err
@@ -820,6 +855,7 @@ func (c *ConsoleAPI) renderJSONWithFilters(logQuery, jobQuery, pluginID string) 
 	}
 	payload := map[string]any{
 		"adapters":      adapterInstances,
+		"alerts":        alerts,
 		"plugins":       c.FilteredPlugins(pluginID),
 		"jobs":          jobs,
 		"schedules":     schedules,
@@ -949,6 +985,10 @@ func consoleScheduleDueEvidenceSuffix(evidence string) string {
 
 func (r sqliteConsoleJobReader) ListJobs() ([]Job, error) {
 	return r.store.ListJobs(context.Background())
+}
+
+func (r sqliteConsoleAlertReader) ListAlerts() ([]AlertRecord, error) {
+	return r.store.ListAlerts(context.Background())
 }
 
 func nullableConsoleTime(value time.Time) *time.Time {

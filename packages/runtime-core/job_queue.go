@@ -15,6 +15,7 @@ type JobQueue struct {
 	jobs         map[string]Job
 	dead         []Job
 	dispatchers  map[string]JobDispatcher
+	alerts       AlertSink
 	now          func() time.Time
 	logger       *Logger
 	tracer       *TraceRecorder
@@ -78,6 +79,14 @@ type jobQueueStore interface {
 	ListJobs(context.Context) ([]Job, error)
 }
 
+type AlertSink interface {
+	RecordAlert(context.Context, AlertRecord) error
+}
+
+type deadLetterTransactionalAlertSink interface {
+	PersistJobDeadLetter(context.Context, Job, AlertRecord) error
+}
+
 type JobDispatcher interface {
 	DispatchQueuedJob(context.Context, Job) error
 }
@@ -109,6 +118,12 @@ func (q *JobQueue) SetStore(store jobQueueStore) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.store = store
+}
+
+func (q *JobQueue) SetAlertSink(sink AlertSink) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.alerts = sink
 }
 
 func (q *JobQueue) RegisterDispatcher(jobType string, dispatcher JobDispatcher) error {
@@ -218,7 +233,7 @@ func (q *JobQueue) Fail(ctx context.Context, id string, reason string) (Job, err
 		q.mu.Unlock()
 		return Job{}, err
 	}
-	if err := persistJob(ctx, q.store, updated); err != nil {
+	if err := q.persistDeadLetter(ctx, updated); err != nil {
 		q.mu.Unlock()
 		return Job{}, err
 	}
@@ -356,7 +371,11 @@ func (q *JobQueue) Restore(ctx context.Context) error {
 			return recoverErr
 		}
 		if changed {
-			if err := persistJob(ctx, store, recovered); err != nil {
+			if recovered.Status == JobStatusDead {
+				if err := q.persistDeadLetter(ctx, recovered); err != nil {
+					return err
+				}
+			} else if err := persistJob(ctx, store, recovered); err != nil {
 				return err
 			}
 			recovery.RecoveredJobs++
@@ -460,6 +479,33 @@ func persistJob(ctx context.Context, store jobQueueStore, job Job) error {
 	}
 	if err := store.SaveJob(ctx, job); err != nil {
 		return fmt.Errorf("persist job %q: %w", job.ID, err)
+	}
+	return nil
+}
+
+func persistAlert(ctx context.Context, sink AlertSink, alert AlertRecord) error {
+	if sink == nil {
+		return nil
+	}
+	if err := sink.RecordAlert(ctx, alert); err != nil {
+		return fmt.Errorf("persist alert %q: %w", alert.ID, err)
+	}
+	return nil
+}
+
+func (q *JobQueue) persistDeadLetter(ctx context.Context, job Job) error {
+	alert := jobDeadLetterAlert(job)
+	if sink, ok := q.alerts.(deadLetterTransactionalAlertSink); ok {
+		if err := sink.PersistJobDeadLetter(ctx, job, alert); err != nil {
+			return fmt.Errorf("persist dead-letter job %q with alert: %w", job.ID, err)
+		}
+		return nil
+	}
+	if err := persistJob(ctx, q.store, job); err != nil {
+		return err
+	}
+	if err := persistAlert(ctx, q.alerts, alert); err != nil {
+		return err
 	}
 	return nil
 }

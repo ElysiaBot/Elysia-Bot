@@ -13,6 +13,19 @@ type failingJobQueueStore struct {
 	err error
 }
 
+type recordingAlertSink struct {
+	alerts []AlertRecord
+	err    error
+}
+
+func (s *recordingAlertSink) RecordAlert(_ context.Context, alert AlertRecord) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.alerts = append(s.alerts, alert)
+	return nil
+}
+
 func (s failingJobQueueStore) SaveJob(context.Context, Job) error {
 	return s.err
 }
@@ -109,6 +122,75 @@ func TestJobQueueFailureCanEnterDeadLetter(t *testing.T) {
 	}
 	if len(queue.DeadLetter(context.Background())) != 1 {
 		t.Fatal("expected dead letter queue to contain one job")
+	}
+}
+
+func TestJobQueueDeadLetterTransitionEmitsSingleAlert(t *testing.T) {
+	t.Parallel()
+
+	queue := NewJobQueue()
+	sink := &recordingAlertSink{}
+	queue.SetAlertSink(sink)
+	deadAt := time.Date(2026, 4, 2, 20, 30, 0, 0, time.UTC)
+	queue.now = func() time.Time { return deadAt }
+
+	job := NewJob("job-alert-1", "webhook.retry", 0, time.Minute)
+	job.TraceID = "trace-alert-1"
+	job.EventID = "evt-alert-1"
+	job.RunID = "run-alert-1"
+	job.Correlation = "corr-alert-1"
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := queue.MarkRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	dead, err := queue.Timeout(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("timeout job: %v", err)
+	}
+	if dead.Status != JobStatusDead || !dead.DeadLetter {
+		t.Fatalf("expected dead-letter job, got %+v", dead)
+	}
+	if len(sink.alerts) != 1 {
+		t.Fatalf("expected one alert, got %+v", sink.alerts)
+	}
+	alert := sink.alerts[0]
+	if alert.ObjectID != job.ID || alert.ObjectType != alertObjectTypeJob || alert.FailureType != alertFailureTypeJobDeadLetter {
+		t.Fatalf("expected dead-letter alert identity, got %+v", alert)
+	}
+	if !alert.FirstOccurredAt.Equal(deadAt) || !alert.LatestOccurredAt.Equal(deadAt) {
+		t.Fatalf("expected dead-letter timestamps to match transition time, got %+v", alert)
+	}
+	if alert.LatestReason != "timeout" || alert.TraceID != job.TraceID || alert.EventID != job.EventID || alert.RunID != job.RunID || alert.Correlation != job.Correlation {
+		t.Fatalf("expected dead-letter alert payload to carry latest reason and trace identifiers, got %+v", alert)
+	}
+}
+
+func TestJobQueueDuplicateDeadLetterTransitionDoesNotDuplicateAlert(t *testing.T) {
+	t.Parallel()
+
+	queue := NewJobQueue()
+	sink := &recordingAlertSink{}
+	queue.SetAlertSink(sink)
+	queue.now = func() time.Time { return time.Date(2026, 4, 2, 20, 45, 0, 0, time.UTC) }
+
+	job := NewJob("job-alert-duplicate", "webhook.retry", 0, time.Minute)
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := queue.MarkRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if _, err := queue.Timeout(context.Background(), job.ID); err != nil {
+		t.Fatalf("first timeout job: %v", err)
+	}
+	if _, err := queue.Timeout(context.Background(), job.ID); err == nil {
+		t.Fatal("expected duplicate dead-letter transition to fail")
+	}
+	if len(sink.alerts) != 1 {
+		t.Fatalf("expected duplicate dead-letter transition not to duplicate alert, got %+v", sink.alerts)
 	}
 }
 
@@ -386,6 +468,7 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 	recoveryAt := time.Date(2026, 4, 7, 11, 21, 0, 0, time.UTC)
 	queue := NewJobQueue()
 	queue.SetStore(store)
+	queue.SetAlertSink(store)
 	queue.now = func() time.Time { return recoveryAt }
 	if err := queue.Restore(context.Background()); err != nil {
 		t.Fatalf("restore queue: %v", err)
@@ -426,6 +509,13 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 	}
 	if snapshot.StatusCounts[JobStatusRetrying] != 1 || snapshot.StatusCounts[JobStatusDead] != 1 {
 		t.Fatalf("expected recovery snapshot status counts, got %+v", snapshot.StatusCounts)
+	}
+	alerts, err := store.ListAlerts(context.Background())
+	if err != nil {
+		t.Fatalf("list alerts: %v", err)
+	}
+	if len(alerts) != 1 || alerts[0].ObjectID != runningDead.ID || alerts[0].LatestReason != recoveryReasonRuntimeRestart {
+		t.Fatalf("expected one persisted dead-letter alert after restore, got %+v", alerts)
 	}
 }
 
