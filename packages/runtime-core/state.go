@@ -91,10 +91,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   max_retries INTEGER NOT NULL,
   timeout_ms INTEGER NOT NULL,
   last_error TEXT NOT NULL,
+  reason_code TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
   next_run_at TEXT,
+  worker_id TEXT NOT NULL DEFAULT '',
+  lease_acquired_at TEXT,
+  lease_expires_at TEXT,
+  heartbeat_at TEXT,
   dead_letter INTEGER NOT NULL,
   trace_id TEXT NOT NULL,
   event_id TEXT NOT NULL,
@@ -220,6 +225,21 @@ func (s *SQLiteStateStore) Init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE schedule_plans ADD COLUMN due_at_evidence TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("add schedule due_at_evidence column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN reason_code TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add jobs reason_code column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add jobs worker_id column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN lease_acquired_at TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add jobs lease_acquired_at column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add jobs lease_expires_at column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add jobs heartbeat_at column: %w", err)
 	}
 	return nil
 }
@@ -652,10 +672,10 @@ func saveJobWithExecutor(ctx context.Context, executor sqliteExecContexter, job 
 	_, err = executor.ExecContext(ctx, `
 INSERT INTO jobs (
   job_id, job_type, status, payload_json, retry_count, max_retries, timeout_ms, last_error,
-  created_at, started_at, finished_at, next_run_at, dead_letter, trace_id, event_id, run_id,
-  correlation, updated_at
+  reason_code, created_at, started_at, finished_at, next_run_at, worker_id, lease_acquired_at,
+  lease_expires_at, heartbeat_at, dead_letter, trace_id, event_id, run_id, correlation, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(job_id) DO UPDATE SET
   job_type=excluded.job_type,
   status=excluded.status,
@@ -664,10 +684,15 @@ ON CONFLICT(job_id) DO UPDATE SET
   max_retries=excluded.max_retries,
   timeout_ms=excluded.timeout_ms,
   last_error=excluded.last_error,
+  reason_code=excluded.reason_code,
   created_at=excluded.created_at,
   started_at=excluded.started_at,
   finished_at=excluded.finished_at,
   next_run_at=excluded.next_run_at,
+  worker_id=excluded.worker_id,
+  lease_acquired_at=excluded.lease_acquired_at,
+  lease_expires_at=excluded.lease_expires_at,
+  heartbeat_at=excluded.heartbeat_at,
   dead_letter=excluded.dead_letter,
   trace_id=excluded.trace_id,
   event_id=excluded.event_id,
@@ -675,7 +700,8 @@ ON CONFLICT(job_id) DO UPDATE SET
   correlation=excluded.correlation,
   updated_at=excluded.updated_at
 `, job.ID, job.Type, job.Status, string(payload), job.RetryCount, job.MaxRetries, job.Timeout.Milliseconds(), job.LastError,
-		formatSQLiteTimestamp(job.CreatedAt), nullableSQLiteTimestamp(job.StartedAt), nullableSQLiteTimestamp(job.FinishedAt), nullableSQLiteTimestamp(job.NextRunAt), boolToSQLiteInt(job.DeadLetter),
+		string(job.ReasonCode), formatSQLiteTimestamp(job.CreatedAt), nullableSQLiteTimestamp(job.StartedAt), nullableSQLiteTimestamp(job.FinishedAt), nullableSQLiteTimestamp(job.NextRunAt), job.WorkerID,
+		nullableSQLiteTimestamp(job.LeaseAcquiredAt), nullableSQLiteTimestamp(job.LeaseExpiresAt), nullableSQLiteTimestamp(job.HeartbeatAt), boolToSQLiteInt(job.DeadLetter),
 		job.TraceID, job.EventID, job.RunID, job.Correlation, formatSQLiteTimestamp(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("upsert job: %w", err)
@@ -766,8 +792,8 @@ func deleteAlertWithExecutor(ctx context.Context, executor sqliteExecContexter, 
 func (s *SQLiteStateStore) LoadJob(ctx context.Context, id string) (Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT job_id, job_type, status, payload_json, retry_count, max_retries, timeout_ms, last_error,
-       created_at, started_at, finished_at, next_run_at, dead_letter, trace_id, event_id, run_id,
-       correlation
+       reason_code, created_at, started_at, finished_at, next_run_at, worker_id, lease_acquired_at,
+       lease_expires_at, heartbeat_at, dead_letter, trace_id, event_id, run_id, correlation
 FROM jobs
 WHERE job_id = ?
 `, id)
@@ -789,8 +815,8 @@ WHERE job_id = ?
 func (s *SQLiteStateStore) ListJobs(ctx context.Context) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT job_id, job_type, status, payload_json, retry_count, max_retries, timeout_ms, last_error,
-       created_at, started_at, finished_at, next_run_at, dead_letter, trace_id, event_id, run_id,
-       correlation
+       reason_code, created_at, started_at, finished_at, next_run_at, worker_id, lease_acquired_at,
+       lease_expires_at, heartbeat_at, dead_letter, trace_id, event_id, run_id, correlation
 FROM jobs
 ORDER BY created_at ASC, job_id ASC
 `)
@@ -1158,15 +1184,19 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 	jobs := make([]Job, 0)
 	for rows.Next() {
 		var (
-			job          Job
-			status       string
-			payloadJSON  string
-			createdAtRaw string
-			startedAtRaw sql.NullString
-			finishedRaw  sql.NullString
-			nextRunRaw   sql.NullString
-			deadLetter   int
-			timeoutMS    int64
+			job                Job
+			status             string
+			reasonCode         string
+			payloadJSON        string
+			createdAtRaw       string
+			startedAtRaw       sql.NullString
+			finishedRaw        sql.NullString
+			nextRunRaw         sql.NullString
+			leaseAcquiredAtRaw sql.NullString
+			leaseExpiresAtRaw  sql.NullString
+			heartbeatAtRaw     sql.NullString
+			deadLetter         int
+			timeoutMS          int64
 		)
 		if err := rows.Scan(
 			&job.ID,
@@ -1177,10 +1207,15 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 			&job.MaxRetries,
 			&timeoutMS,
 			&job.LastError,
+			&reasonCode,
 			&createdAtRaw,
 			&startedAtRaw,
 			&finishedRaw,
 			&nextRunRaw,
+			&job.WorkerID,
+			&leaseAcquiredAtRaw,
+			&leaseExpiresAtRaw,
+			&heartbeatAtRaw,
 			&deadLetter,
 			&job.TraceID,
 			&job.EventID,
@@ -1190,6 +1225,7 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}
 		job.Status = JobStatus(status)
+		job.ReasonCode = pluginsdk.JobReasonCode(reasonCode)
 		job.Timeout = time.Duration(timeoutMS) * time.Millisecond
 		job.DeadLetter = deadLetter == 1
 
@@ -1213,6 +1249,15 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		}
 		if job.NextRunAt, err = parseNullableSQLiteTimestamp(nextRunRaw); err != nil {
 			return nil, fmt.Errorf("parse job next_run_at: %w", err)
+		}
+		if job.LeaseAcquiredAt, err = parseNullableSQLiteTimestamp(leaseAcquiredAtRaw); err != nil {
+			return nil, fmt.Errorf("parse job lease_acquired_at: %w", err)
+		}
+		if job.LeaseExpiresAt, err = parseNullableSQLiteTimestamp(leaseExpiresAtRaw); err != nil {
+			return nil, fmt.Errorf("parse job lease_expires_at: %w", err)
+		}
+		if job.HeartbeatAt, err = parseNullableSQLiteTimestamp(heartbeatAtRaw); err != nil {
+			return nil, fmt.Errorf("parse job heartbeat_at: %w", err)
 		}
 		jobs = append(jobs, job)
 	}

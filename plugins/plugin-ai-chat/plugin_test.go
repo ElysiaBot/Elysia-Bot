@@ -201,6 +201,31 @@ func TestPluginAIChatProcessesJobAndReplies(t *testing.T) {
 	}
 }
 
+func TestPluginAIChatProcessJobRespectsQueueOwnedRunningState(t *testing.T) {
+	t.Parallel()
+
+	queue := newJobQueueStub()
+	replies := &replyRecorder{}
+	plugin := New(queue, providerStub{response: "ai response"}, &sessionRecorder{}, replies)
+
+	job := pluginsdk.NewJob("job-ai-chat-running-owned", "ai.chat", 1, 30*time.Second)
+	job.Payload = map[string]any{"prompt": "hello ai"}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := queue.MarkRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	if err := plugin.ProcessJob(context.Background(), job.ID, eventmodel.ReplyHandle{Capability: "onebot.reply", TargetID: "group-42"}); err != nil {
+		t.Fatalf("process already-running job: %v", err)
+	}
+	stored, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil || stored.Status != pluginsdk.JobStatusDone {
+		t.Fatalf("expected done job after queue-owned running path, got %+v err=%v", stored, err)
+	}
+}
+
 func TestPluginAIChatFailureFeedbackAfterRetryExhaustion(t *testing.T) {
 	t.Parallel()
 

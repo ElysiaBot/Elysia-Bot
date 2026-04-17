@@ -111,6 +111,11 @@ type ConsoleJob struct {
 	StartedAt               *time.Time              `json:"startedAt"`
 	FinishedAt              *time.Time              `json:"finishedAt"`
 	NextRunAt               *time.Time              `json:"nextRunAt"`
+	WorkerID                string                  `json:"workerId,omitempty"`
+	LeaseAcquiredAt         *time.Time              `json:"leaseAcquiredAt,omitempty"`
+	LeaseExpiresAt          *time.Time              `json:"leaseExpiresAt,omitempty"`
+	HeartbeatAt             *time.Time              `json:"heartbeatAt,omitempty"`
+	ReasonCode              JobReasonCode           `json:"reasonCode,omitempty"`
 	DeadLetter              bool                    `json:"deadLetter"`
 	Correlation             string                  `json:"correlation"`
 	TargetPluginID          string                  `json:"targetPluginId,omitempty"`
@@ -121,6 +126,7 @@ type ConsoleJob struct {
 	QueueStateSummary       string                  `json:"queueStateSummary,omitempty"`
 	DispatchSummary         string                  `json:"dispatchSummary,omitempty"`
 	QueueContractSummary    string                  `json:"queueContractSummary,omitempty"`
+	LeaseSummary            string                  `json:"leaseSummary,omitempty"`
 	DispatchPermission      string                  `json:"dispatchPermission,omitempty"`
 	DispatchActor           string                  `json:"dispatchActor,omitempty"`
 	DispatchRBAC            *ConsoleRBACDeclaration `json:"dispatchRbac,omitempty"`
@@ -1214,10 +1220,7 @@ func toConsoleJob(job Job) ConsoleJob {
 	dispatchReady := queuedDispatchReady(job, dispatchMetadataPresent, time.Now().UTC())
 	dispatchSummary := queuedDispatchSummary(dispatchActor, targetPluginID, dispatchPermission)
 	replySummary := queuedReplySummary(replyHandleCapability, replyTarget)
-	recoverySummary := ""
-	if job.LastError == recoveryReasonRuntimeRestart && (job.Status == JobStatusRetrying || job.Status == JobStatusDead) {
-		recoverySummary = string(job.Status) + " after runtime restart"
-	}
+	recoverySummary := queuedRecoverySummary(job)
 	return ConsoleJob{
 		ID:                      job.ID,
 		Type:                    job.Type,
@@ -1234,6 +1237,11 @@ func toConsoleJob(job Job) ConsoleJob {
 		StartedAt:               job.StartedAt,
 		FinishedAt:              job.FinishedAt,
 		NextRunAt:               job.NextRunAt,
+		WorkerID:                job.WorkerID,
+		LeaseAcquiredAt:         job.LeaseAcquiredAt,
+		LeaseExpiresAt:          job.LeaseExpiresAt,
+		HeartbeatAt:             job.HeartbeatAt,
+		ReasonCode:              job.ReasonCode,
 		DeadLetter:              job.DeadLetter,
 		Correlation:             job.Correlation,
 		TargetPluginID:          targetPluginID,
@@ -1244,6 +1252,7 @@ func toConsoleJob(job Job) ConsoleJob {
 		QueueStateSummary:       queuedStateSummary(job, dispatchMetadataPresent, dispatchContractPresent, dispatchReady),
 		DispatchSummary:         dispatchSummary,
 		QueueContractSummary:    queuedContractSummary(dispatchSummary, replySummary),
+		LeaseSummary:            queuedLeaseSummary(job),
 		DispatchPermission:      dispatchPermission,
 		DispatchActor:           dispatchActor,
 		DispatchRBAC:            queuedJobRBACDeclaration(dispatchActor, dispatchPermission, targetPluginID),
@@ -1388,6 +1397,40 @@ func queuedDispatchReady(job Job, dispatchMetadataPresent bool, now time.Time) b
 	default:
 		return false
 	}
+}
+
+func queuedLeaseSummary(job Job) string {
+	parts := make([]string, 0, 4)
+	if job.WorkerID != "" {
+		parts = append(parts, "worker="+job.WorkerID)
+	}
+	if job.LeaseAcquiredAt != nil && !job.LeaseAcquiredAt.IsZero() {
+		parts = append(parts, "lease_acquired_at="+job.LeaseAcquiredAt.UTC().Format(time.RFC3339))
+	}
+	if job.LeaseExpiresAt != nil && !job.LeaseExpiresAt.IsZero() {
+		parts = append(parts, "lease_expires_at="+job.LeaseExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if job.HeartbeatAt != nil && !job.HeartbeatAt.IsZero() {
+		parts = append(parts, "heartbeat_at="+job.HeartbeatAt.UTC().Format(time.RFC3339))
+	}
+	return strings.Join(parts, " ")
+}
+
+func queuedRecoverySummary(job Job) string {
+	if job.ReasonCode == "" && job.LastError == "" {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if job.ReasonCode != "" {
+		parts = append(parts, "reason_code="+string(job.ReasonCode))
+	}
+	if job.LastError != "" {
+		parts = append(parts, job.LastError)
+	}
+	if job.WorkerID != "" {
+		parts = append(parts, "worker="+job.WorkerID)
+	}
+	return strings.Join(parts, " | ")
 }
 
 func queuedDispatchConsoleFields(payload map[string]any) (targetPluginID string, dispatchMetadataPresent bool, dispatchContractPresent bool, dispatchPermission string, dispatchActor string, replyHandlePresent bool, replyHandleCapability string, replyContractPresent bool, replyTarget string, sessionIDPresent bool, replyTargetPresent bool) {

@@ -1029,6 +1029,14 @@ func TestConsoleAPIRenderJSONMatchesFrontendJobContract(t *testing.T) {
 	job := NewJob("job-console-contract", "ai.call", 2, 30*time.Second)
 	job.Correlation = "corr-console"
 	job.Status = JobStatusPending
+	job.WorkerID = "runtime-local:test-worker"
+	now := time.Now().UTC()
+	leaseExpiresAt := now.Add(30 * time.Second)
+	job.LeaseAcquiredAt = &now
+	job.LeaseExpiresAt = &leaseExpiresAt
+	job.HeartbeatAt = &now
+	job.ReasonCode = JobReasonCodeDispatchRetry
+	job.LastError = "reply handle payload is required"
 	job.Payload = map[string]any{
 		"dispatch": map[string]any{
 			"target_plugin_id": "plugin-ai-chat",
@@ -1061,10 +1069,22 @@ func TestConsoleAPIRenderJSONMatchesFrontendJobContract(t *testing.T) {
 		t.Fatalf("expected one job in payload, got %+v", payload.Jobs)
 	}
 	jobPayload := payload.Jobs[0]
-	for _, key := range []string{"id", "type", "status", "retryCount", "maxRetries", "timeout", "createdAt", "deadLetter", "correlation", "targetPluginId", "dispatchMetadataPresent", "dispatchContractPresent", "queueContractComplete", "dispatchReady", "queueStateSummary", "dispatchSummary", "queueContractSummary", "dispatchPermission", "dispatchActor", "replyHandlePresent", "replyHandleCapability", "replyContractPresent", "replySummary", "sessionIDPresent", "replyTargetPresent"} {
+	for _, key := range []string{"id", "type", "status", "retryCount", "maxRetries", "timeout", "createdAt", "workerId", "leaseAcquiredAt", "leaseExpiresAt", "heartbeatAt", "reasonCode", "deadLetter", "correlation", "targetPluginId", "dispatchMetadataPresent", "dispatchContractPresent", "queueContractComplete", "dispatchReady", "queueStateSummary", "dispatchSummary", "queueContractSummary", "leaseSummary", "dispatchPermission", "dispatchActor", "replyHandlePresent", "replyHandleCapability", "replyContractPresent", "replySummary", "sessionIDPresent", "replyTargetPresent", "recoverySummary"} {
 		if _, ok := jobPayload[key]; !ok {
 			t.Fatalf("expected frontend job key %q in payload, got %+v", key, jobPayload)
 		}
+	}
+	if got, ok := jobPayload["workerId"].(string); !ok || got != "runtime-local:test-worker" {
+		t.Fatalf("expected workerId in payload, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["reasonCode"].(string); !ok || got != "dispatch_retry" {
+		t.Fatalf("expected reasonCode=dispatch_retry, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["leaseSummary"].(string); !ok || !strings.Contains(got, "worker=runtime-local:test-worker") {
+		t.Fatalf("expected leaseSummary to include worker ownership, got %+v", jobPayload)
+	}
+	if got, ok := jobPayload["recoverySummary"].(string); !ok || !strings.Contains(got, "reason_code=dispatch_retry") {
+		t.Fatalf("expected recoverySummary to include reason code, got %+v", jobPayload)
 	}
 	if got, ok := jobPayload["dispatchMetadataPresent"].(bool); !ok || !got {
 		t.Fatalf("expected dispatchMetadataPresent=true, got %+v", jobPayload)
@@ -1110,6 +1130,21 @@ func TestConsoleAPIRenderJSONMatchesFrontendJobContract(t *testing.T) {
 	}
 	if _, ok := jobPayload["timeout"].(float64); !ok {
 		t.Fatalf("expected numeric timeout for live JSON payload, got %T (%+v)", jobPayload["timeout"], jobPayload["timeout"])
+	}
+}
+
+func TestConsoleAPIJobRecoverySummaryDistinguishesWorkerAbandonment(t *testing.T) {
+	t.Parallel()
+
+	job := NewJob("job-console-recovery", "ai.chat", 1, 30*time.Second)
+	job.Status = JobStatusRetrying
+	job.ReasonCode = JobReasonCodeWorkerAbandoned
+	job.LastError = "worker runtime-local:test-worker lease abandoned during runtime restart"
+	job.WorkerID = "runtime-local:test-worker"
+
+	consoleJob := toConsoleJob(job)
+	if !strings.Contains(consoleJob.RecoverySummary, "reason_code=worker_abandoned") || !strings.Contains(consoleJob.RecoverySummary, "worker=runtime-local:test-worker") {
+		t.Fatalf("expected worker abandonment recovery summary, got %+v", consoleJob)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,6 +80,35 @@ type failingInspectJobQueue struct {
 
 func (q failingInspectJobQueue) Inspect(_ context.Context, _ string) (Job, error) {
 	return Job{}, q.err
+}
+
+type heartbeatCountingQueue struct {
+	*JobQueue
+	heartbeats int32
+	lastErr    atomic.Value
+}
+
+func (q *heartbeatCountingQueue) Heartbeat(ctx context.Context, id string) (Job, error) {
+	updated, err := q.JobQueue.Heartbeat(ctx, id)
+	if err != nil {
+		q.lastErr.Store(err.Error())
+		return updated, err
+	}
+	atomic.AddInt32(&q.heartbeats, 1)
+	return updated, nil
+}
+
+func (q *heartbeatCountingQueue) HeartbeatCount() int32 {
+	return atomic.LoadInt32(&q.heartbeats)
+}
+
+func (q *heartbeatCountingQueue) LastHeartbeatError() string {
+	if value := q.lastErr.Load(); value != nil {
+		if errText, ok := value.(string); ok {
+			return errText
+		}
+	}
+	return ""
 }
 
 type recordingScheduleHandler struct {
@@ -4235,6 +4265,59 @@ func TestRuntimeDispatchQueuedJobUsesPersistedEnvelope(t *testing.T) {
 	}
 }
 
+func TestRuntimeDispatchQueuedJobRenewsHeartbeatDuringExecution(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+	baseQueue := NewJobQueue()
+	baseQueue.SetStore(store)
+	baseQueue.SetWorkerIdentity("runtime-local:test-worker")
+	queue := &heartbeatCountingQueue{JobQueue: baseQueue}
+	base := time.Now().UTC()
+
+	job := NewJob("job-heartbeat-runtime", "ai.chat", 1, 1500*time.Millisecond)
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	claimed, err := queue.MarkRunning(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	first, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect first claimed job: %v", err)
+	}
+	if first.LeaseAcquiredAt == nil {
+		t.Fatalf("expected initial lease acquisition, got %+v", first)
+	}
+
+	heartbeatCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := startQueuedJobHeartbeat(heartbeatCtx, queue, claimed)
+	defer stop()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected runtime heartbeat renewal during execution, heartbeat_count=%d last_error=%q", queue.HeartbeatCount(), queue.LastHeartbeatError())
+		}
+		if queue.HeartbeatCount() >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	running, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect running job: %v", err)
+	}
+	if running.LeaseAcquiredAt == nil || !running.LeaseAcquiredAt.Equal(*first.LeaseAcquiredAt) {
+		t.Fatalf("expected lease acquisition time to stay fixed during renewal, first=%+v running=%+v", first, running)
+	}
+	if running.LeaseExpiresAt == nil || !running.LeaseExpiresAt.After(base) {
+		t.Fatalf("expected renewed lease expiry, got %+v", running)
+	}
+}
+
 func TestRuntimeDispatchQueuedJobFailsMalformedReplyAndMovesJobOutOfPending(t *testing.T) {
 	t.Parallel()
 
@@ -4256,7 +4339,7 @@ func TestRuntimeDispatchQueuedJobFailsMalformedReplyAndMovesJobOutOfPending(t *t
 	if err != nil {
 		t.Fatalf("inspect updated job: %v", err)
 	}
-	if updated.Status != JobStatusDead || updated.LastError == "" {
+	if updated.Status != JobStatusDead || updated.LastError == "" || updated.ReasonCode != JobReasonCodeDispatchDead {
 		t.Fatalf("expected queued dispatch failure to move job to dead with reason, got %+v", updated)
 	}
 }
@@ -4292,8 +4375,64 @@ func TestRuntimeDispatchQueuedJobFailureMovesJobOutOfPendingWhenDispatchDidNotSt
 	if err != nil {
 		t.Fatalf("inspect updated job: %v", err)
 	}
-	if updated.Status != JobStatusDead || updated.LastError == "" {
+	if updated.Status != JobStatusDead || updated.LastError == "" || updated.ReasonCode != JobReasonCodeDispatchDead {
 		t.Fatalf("expected dispatch failure to move job to dead with reason, got %+v", updated)
+	}
+}
+
+func TestRuntimeDispatchQueuedJobFailureMovesAlreadyRunningJobOutOfRunningAfterHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	baseQueue := NewJobQueue()
+	baseQueue.SetWorkerIdentity("runtime-local:test-worker")
+	queue := &heartbeatCountingQueue{JobQueue: baseQueue}
+	job := NewJob("job-running-post-heartbeat-dispatch-fail", "ai.chat", 1, 1200*time.Millisecond)
+	job.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"permission":       "job:run",
+			"target_plugin_id": "plugin-missing",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+	}
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	running, err := queue.MarkRunning(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	stopHeartbeat := startQueuedJobHeartbeat(context.Background(), queue, running)
+	defer stopHeartbeat()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for queue.HeartbeatCount() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected at least one heartbeat renewal before dispatch failure, last_error=%q", queue.LastHeartbeatError())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	stored, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect running job after heartbeat: %v", err)
+	}
+	if stored.Status != JobStatusRunning || stored.HeartbeatAt == nil {
+		t.Fatalf("expected heartbeated running job before failure, got %+v", stored)
+	}
+
+	if err := runtime.DispatchQueuedJob(context.Background(), queue, stored); err == nil {
+		t.Fatal("expected dispatch failure for missing plugin target")
+	}
+	updated, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect updated job: %v", err)
+	}
+	if updated.Status != JobStatusRetrying || updated.LastError == "" || updated.ReasonCode != JobReasonCodeDispatchRetry {
+		t.Fatalf("expected post-heartbeat dispatch failure to move running job to retrying with dispatch reason, got %+v", updated)
 	}
 }
 

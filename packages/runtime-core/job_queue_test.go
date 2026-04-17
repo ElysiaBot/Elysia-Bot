@@ -38,6 +38,7 @@ func TestJobQueueEnqueueInspectAndComplete(t *testing.T) {
 	t.Parallel()
 
 	queue := NewJobQueue()
+	queue.SetWorkerIdentity("runtime-local:test-worker")
 	queue.now = func() time.Time { return time.Date(2026, 4, 2, 20, 0, 0, 0, time.UTC) }
 
 	job := NewJob("job-q-1", "ai.call", 1, 30*time.Second)
@@ -56,6 +57,13 @@ func TestJobQueueEnqueueInspectAndComplete(t *testing.T) {
 	if _, err := queue.MarkRunning(context.Background(), "job-q-1"); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
+	running, err := queue.Inspect(context.Background(), "job-q-1")
+	if err != nil {
+		t.Fatalf("inspect running job: %v", err)
+	}
+	if running.WorkerID != "runtime-local:test-worker" || running.LeaseAcquiredAt == nil || running.LeaseExpiresAt == nil || running.HeartbeatAt == nil {
+		t.Fatalf("expected running job ownership facts, got %+v", running)
+	}
 	completed, err := queue.Complete(context.Background(), "job-q-1")
 	if err != nil {
 		t.Fatalf("complete job: %v", err)
@@ -63,12 +71,16 @@ func TestJobQueueEnqueueInspectAndComplete(t *testing.T) {
 	if completed.Status != JobStatusDone {
 		t.Fatalf("expected done job, got %+v", completed)
 	}
+	if completed.WorkerID != "" || completed.LeaseAcquiredAt != nil || completed.HeartbeatAt != nil {
+		t.Fatalf("expected ownership facts to clear on completion, got %+v", completed)
+	}
 }
 
 func TestJobQueueFailureTriggersRetryWithBackoff(t *testing.T) {
 	t.Parallel()
 
 	queue := NewJobQueue()
+	queue.SetWorkerIdentity("runtime-local:test-worker")
 	queue.now = func() time.Time { return time.Date(2026, 4, 2, 20, 0, 0, 0, time.UTC) }
 
 	job := NewJob("job-q-2", "file.process", 2, time.Minute)
@@ -85,6 +97,9 @@ func TestJobQueueFailureTriggersRetryWithBackoff(t *testing.T) {
 	}
 	if retrying.Status != JobStatusRetrying || retrying.RetryCount != 1 {
 		t.Fatalf("expected retrying job, got %+v", retrying)
+	}
+	if retrying.ReasonCode != JobReasonCodeExecutionRetry {
+		t.Fatalf("expected execution retry reason code, got %+v", retrying)
 	}
 	if retrying.NextRunAt == nil || !retrying.NextRunAt.Equal(time.Date(2026, 4, 2, 20, 0, 1, 0, time.UTC)) {
 		t.Fatalf("unexpected backoff timestamp %+v", retrying.NextRunAt)
@@ -103,6 +118,7 @@ func TestJobQueueFailureCanEnterDeadLetter(t *testing.T) {
 	t.Parallel()
 
 	queue := NewJobQueue()
+	queue.SetWorkerIdentity("runtime-local:test-worker")
 	queue.now = func() time.Time { return time.Date(2026, 4, 2, 20, 0, 0, 0, time.UTC) }
 
 	job := NewJob("job-q-3", "webhook.retry", 0, time.Minute)
@@ -120,8 +136,47 @@ func TestJobQueueFailureCanEnterDeadLetter(t *testing.T) {
 	if dead.Status != JobStatusDead || !dead.DeadLetter {
 		t.Fatalf("expected dead-letter job, got %+v", dead)
 	}
+	if dead.ReasonCode != JobReasonCodeTimeout {
+		t.Fatalf("expected timeout reason code, got %+v", dead)
+	}
 	if len(queue.DeadLetter(context.Background())) != 1 {
 		t.Fatal("expected dead letter queue to contain one job")
+	}
+}
+
+func TestJobQueueHeartbeatRenewsLeaseWithoutResettingLeaseAcquiredAt(t *testing.T) {
+	t.Parallel()
+
+	queue := NewJobQueue()
+	queue.SetWorkerIdentity("runtime-local:test-worker")
+	base := time.Date(2026, 4, 2, 20, 0, 0, 0, time.UTC)
+	queue.now = func() time.Time { return base }
+
+	job := NewJob("job-heartbeat-renew", "ai.chat", 1, 30*time.Second)
+	if err := queue.Enqueue(context.Background(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := queue.MarkRunning(context.Background(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	first, err := queue.Inspect(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect first running job: %v", err)
+	}
+	queue.now = func() time.Time { return base.Add(5 * time.Second) }
+	renewed, err := queue.Heartbeat(context.Background(), job.ID)
+	if err != nil {
+		t.Fatalf("heartbeat job: %v", err)
+	}
+	if renewed.LeaseAcquiredAt == nil || first.LeaseAcquiredAt == nil || !renewed.LeaseAcquiredAt.Equal(*first.LeaseAcquiredAt) {
+		t.Fatalf("expected heartbeat to preserve lease acquisition time, got first=%+v renewed=%+v", first, renewed)
+	}
+	if renewed.HeartbeatAt == nil || !renewed.HeartbeatAt.Equal(base.Add(5*time.Second)) {
+		t.Fatalf("expected heartbeat timestamp to move forward, got %+v", renewed)
+	}
+	if renewed.LeaseExpiresAt == nil || !renewed.LeaseExpiresAt.Equal(base.Add(35*time.Second)) {
+		t.Fatalf("expected lease expiry to extend from renewed heartbeat, got %+v", renewed)
 	}
 }
 
@@ -534,6 +589,13 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 		Timeout:    30 * time.Second,
 		CreatedAt:  time.Date(2026, 4, 7, 11, 20, 0, 0, time.UTC),
 	}
+	leaseAcquiredAt := time.Date(2026, 4, 7, 11, 20, 0, 0, time.UTC)
+	heartbeatAt := leaseAcquiredAt.Add(5 * time.Second)
+	leaseExpiresAt := heartbeatAt.Add(-1 * time.Second)
+	runningRetry.WorkerID = "runtime-local:test-worker"
+	runningRetry.LeaseAcquiredAt = &leaseAcquiredAt
+	runningRetry.LeaseExpiresAt = &leaseExpiresAt
+	runningRetry.HeartbeatAt = &heartbeatAt
 	runningDead := Job{
 		ID:         "job-restore-running-dead",
 		Type:       "ai.chat",
@@ -543,6 +605,10 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 		Timeout:    30 * time.Second,
 		CreatedAt:  time.Date(2026, 4, 7, 11, 20, 1, 0, time.UTC),
 	}
+	runningDead.WorkerID = "runtime-local:test-worker"
+	runningDead.LeaseAcquiredAt = &leaseAcquiredAt
+	runningDead.LeaseExpiresAt = &leaseExpiresAt
+	runningDead.HeartbeatAt = &heartbeatAt
 	if err := store.SaveJob(context.Background(), runningRetry); err != nil {
 		t.Fatalf("save running retry job: %v", err)
 	}
@@ -566,7 +632,7 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 	if retried.Status != JobStatusRetrying || retried.RetryCount != 1 || retried.NextRunAt == nil || !retried.NextRunAt.Equal(recoveryAt) {
 		t.Fatalf("expected running job to recover as retrying, got %+v", retried)
 	}
-	if !strings.Contains(retried.LastError, "runtime restarted") {
+	if retried.ReasonCode != JobReasonCodeWorkerAbandoned || !strings.Contains(retried.LastError, "lease abandoned") {
 		t.Fatalf("expected restart error reason, got %+v", retried)
 	}
 
@@ -599,8 +665,50 @@ func TestJobQueueRestoreConvertsRunningJobToRetryingOrDead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list alerts: %v", err)
 	}
-	if len(alerts) != 1 || alerts[0].ObjectID != runningDead.ID || alerts[0].LatestReason != recoveryReasonRuntimeRestart {
+	if len(alerts) != 1 || alerts[0].ObjectID != runningDead.ID || !strings.Contains(alerts[0].LatestReason, "lease abandoned") {
 		t.Fatalf("expected one persisted dead-letter alert after restore, got %+v", alerts)
+	}
+}
+
+func TestJobQueueRestoreKeepsRuntimeRestartReasonWhenLeaseIsStillValid(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	leaseAcquiredAt := time.Date(2026, 4, 7, 11, 20, 0, 0, time.UTC)
+	heartbeatAt := leaseAcquiredAt.Add(5 * time.Second)
+	leaseExpiresAt := heartbeatAt.Add(30 * time.Second)
+	running := Job{
+		ID:              "job-restore-runtime-restart",
+		Type:            "ai.chat",
+		Status:          JobStatusRunning,
+		RetryCount:      0,
+		MaxRetries:      1,
+		Timeout:         30 * time.Second,
+		CreatedAt:       time.Date(2026, 4, 7, 11, 20, 0, 0, time.UTC),
+		WorkerID:        "runtime-local:test-worker",
+		LeaseAcquiredAt: &leaseAcquiredAt,
+		LeaseExpiresAt:  &leaseExpiresAt,
+		HeartbeatAt:     &heartbeatAt,
+	}
+	if err := store.SaveJob(context.Background(), running); err != nil {
+		t.Fatalf("save running job: %v", err)
+	}
+
+	queue := NewJobQueue()
+	queue.SetStore(store)
+	queue.now = func() time.Time { return heartbeatAt.Add(10 * time.Second) }
+	if err := queue.Restore(context.Background()); err != nil {
+		t.Fatalf("restore queue: %v", err)
+	}
+
+	restored, err := queue.Inspect(context.Background(), running.ID)
+	if err != nil {
+		t.Fatalf("inspect restored job: %v", err)
+	}
+	if restored.ReasonCode != JobReasonCodeRuntimeRestart || !strings.Contains(restored.LastError, "runtime restarted") {
+		t.Fatalf("expected runtime restart classification for unexpired lease, got %+v", restored)
 	}
 }
 

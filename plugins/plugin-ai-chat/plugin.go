@@ -108,9 +108,15 @@ func (p *Plugin) ProcessJob(ctx context.Context, jobID string, reply eventmodel.
 	if p.Queue == nil || p.Provider == nil || p.ReplyService == nil {
 		return errors.New("queue, provider, and reply service are required")
 	}
-	job, err := p.Queue.MarkRunning(ctx, jobID)
+	job, err := p.Queue.Inspect(ctx, jobID)
 	if err != nil {
 		return err
+	}
+	if job.Status != pluginsdk.JobStatusRunning {
+		job, err = p.Queue.MarkRunning(ctx, jobID)
+		if err != nil {
+			return err
+		}
 	}
 	prompt, _ := job.Payload["prompt"].(string)
 

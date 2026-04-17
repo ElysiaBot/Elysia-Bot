@@ -7,6 +7,7 @@ import (
 )
 
 type JobStatus = pluginsdk.JobStatus
+type JobReasonCode = pluginsdk.JobReasonCode
 
 const (
 	JobStatusPending   = pluginsdk.JobStatusPending
@@ -16,6 +17,14 @@ const (
 	JobStatusFailed    = pluginsdk.JobStatusFailed
 	JobStatusDead      = pluginsdk.JobStatusDead
 	JobStatusDone      = pluginsdk.JobStatusDone
+
+	JobReasonCodeRuntimeRestart  = pluginsdk.JobReasonCodeRuntimeRestart
+	JobReasonCodeWorkerAbandoned = pluginsdk.JobReasonCodeWorkerAbandoned
+	JobReasonCodeTimeout         = pluginsdk.JobReasonCodeTimeout
+	JobReasonCodeDispatchRetry   = pluginsdk.JobReasonCodeDispatchRetry
+	JobReasonCodeDispatchDead    = pluginsdk.JobReasonCodeDispatchDead
+	JobReasonCodeExecutionRetry  = pluginsdk.JobReasonCodeExecutionRetry
+	JobReasonCodeExecutionDead   = pluginsdk.JobReasonCodeExecutionDead
 )
 
 type Job = pluginsdk.Job

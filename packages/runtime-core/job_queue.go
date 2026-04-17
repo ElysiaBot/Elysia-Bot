@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +17,8 @@ type JobQueue struct {
 	dead         []Job
 	dispatchers  map[string]JobDispatcher
 	alerts       AlertSink
+	workerID     string
+	leaseTTL     time.Duration
 	now          func() time.Time
 	logger       *Logger
 	tracer       *TraceRecorder
@@ -24,7 +27,10 @@ type JobQueue struct {
 	lastRecovery JobRecoverySnapshot
 }
 
-const recoveryReasonRuntimeRestart = "runtime restarted during job execution"
+const (
+	recoveryReasonRuntimeRestart = "runtime restarted during job execution"
+	defaultJobLeaseTTL           = 30 * time.Second
+)
 
 type JobRecoverySnapshot struct {
 	RecoveredAt      time.Time         `json:"recoveredAt"`
@@ -103,11 +109,28 @@ func NewJobQueue() *JobQueue {
 	return &JobQueue{
 		jobs:        make(map[string]Job),
 		dispatchers: make(map[string]JobDispatcher),
+		leaseTTL:    defaultJobLeaseTTL,
 		now:         time.Now().UTC,
 		logger:      NewLogger(io.Discard),
 		tracer:      NewTraceRecorder(),
 		metrics:     NewMetricsRegistry(),
 	}
+}
+
+func (q *JobQueue) SetWorkerIdentity(workerID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.workerID = workerID
+}
+
+func (q *JobQueue) SetLeaseTTL(ttl time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if ttl <= 0 {
+		q.leaseTTL = defaultJobLeaseTTL
+		return
+	}
+	q.leaseTTL = ttl
 }
 
 func (q *JobQueue) SetObservability(logger *Logger, tracer *TraceRecorder, metrics *MetricsRegistry) {
@@ -153,8 +176,15 @@ func (q *JobQueue) DispatchReady(ctx context.Context, at time.Time) {
 		if dispatcher == nil {
 			continue
 		}
-		if err := dispatcher.DispatchQueuedJob(ctx, job); err != nil && q.logger != nil {
-			_ = q.logger.Log("error", "job queue dispatcher returned error", LogContext{TraceID: job.TraceID, EventID: job.EventID, RunID: job.RunID, CorrelationID: job.Correlation}, map[string]any{"job_id": job.ID, "job_type": job.Type, "error": err.Error()})
+		claimed, claimErr := q.MarkRunning(ctx, job.ID)
+		if claimErr != nil {
+			if q.logger != nil {
+				_ = q.logger.Log("error", "job queue failed to claim ready job", LogContext{TraceID: job.TraceID, EventID: job.EventID, RunID: job.RunID, CorrelationID: job.Correlation}, map[string]any{"job_id": job.ID, "job_type": job.Type, "error": claimErr.Error()})
+			}
+			continue
+		}
+		if err := dispatcher.DispatchQueuedJob(ctx, claimed); err != nil && q.logger != nil {
+			_ = q.logger.Log("error", "job queue dispatcher returned error", LogContext{TraceID: claimed.TraceID, EventID: claimed.EventID, RunID: claimed.RunID, CorrelationID: claimed.Correlation}, map[string]any{"job_id": claimed.ID, "job_type": claimed.Type, "error": err.Error()})
 		}
 	}
 }
@@ -201,15 +231,51 @@ func (q *JobQueue) Inspect(_ context.Context, id string) (Job, error) {
 	return job, nil
 }
 
+func (q *JobQueue) Heartbeat(ctx context.Context, id string) (Job, error) {
+	q.mu.Lock()
+	job, exists := q.jobs[id]
+	if !exists {
+		q.mu.Unlock()
+		return Job{}, errors.New("job not found")
+	}
+	if job.Status != JobStatusRunning {
+		q.mu.Unlock()
+		return Job{}, fmt.Errorf("job %q is not running", id)
+	}
+	now := q.now()
+	updated := q.renewLease(job, now)
+	if err := persistJob(ctx, q.store, updated); err != nil {
+		q.mu.Unlock()
+		return Job{}, err
+	}
+	q.jobs[id] = updated
+	q.mu.Unlock()
+	return updated, nil
+}
+
 func (q *JobQueue) MarkRunning(ctx context.Context, id string) (Job, error) {
-	return q.transition(ctx, id, JobStatusRunning, "")
+	return q.transition(ctx, id, JobStatusRunning, "", "")
 }
 
 func (q *JobQueue) Complete(ctx context.Context, id string) (Job, error) {
-	return q.transition(ctx, id, JobStatusDone, "")
+	return q.transition(ctx, id, JobStatusDone, "", "")
 }
 
 func (q *JobQueue) Fail(ctx context.Context, id string, reason string) (Job, error) {
+	q.mu.RLock()
+	job, exists := q.jobs[id]
+	q.mu.RUnlock()
+	if !exists {
+		return Job{}, errors.New("job not found")
+	}
+	return q.failWithReasonCode(ctx, id, reason, executionReasonCode(job))
+}
+
+func (q *JobQueue) FailWithReasonCode(ctx context.Context, id string, reason string, reasonCode JobReasonCode) (Job, error) {
+	return q.failWithReasonCode(ctx, id, reason, reasonCode)
+}
+
+func (q *JobQueue) failWithReasonCode(ctx context.Context, id string, reason string, reasonCode JobReasonCode) (Job, error) {
 	q.mu.Lock()
 
 	job, exists := q.jobs[id]
@@ -225,6 +291,7 @@ func (q *JobQueue) Fail(ctx context.Context, id string, reason string) (Job, err
 			q.mu.Unlock()
 			return Job{}, err
 		}
+		updated = q.applyFailureMetadata(updated, reasonCode)
 		if err := persistJob(ctx, q.store, updated); err != nil {
 			q.mu.Unlock()
 			return Job{}, err
@@ -241,6 +308,7 @@ func (q *JobQueue) Fail(ctx context.Context, id string, reason string) (Job, err
 		q.mu.Unlock()
 		return Job{}, err
 	}
+	updated = q.applyFailureMetadata(updated, deadReasonCode(reasonCode))
 	if err := q.persistDeadLetter(ctx, updated); err != nil {
 		q.mu.Unlock()
 		return Job{}, err
@@ -254,7 +322,16 @@ func (q *JobQueue) Fail(ctx context.Context, id string, reason string) (Job, err
 }
 
 func (q *JobQueue) Timeout(ctx context.Context, id string) (Job, error) {
-	return q.Fail(ctx, id, "timeout")
+	q.mu.RLock()
+	job, exists := q.jobs[id]
+	q.mu.RUnlock()
+	if !exists {
+		return Job{}, errors.New("job not found")
+	}
+	if job.RetryCount < job.MaxRetries {
+		return q.failWithReasonCode(ctx, id, "timeout", JobReasonCodeTimeout)
+	}
+	return q.failWithReasonCode(ctx, id, "timeout", JobReasonCodeTimeout)
 }
 
 func (q *JobQueue) Retry(ctx context.Context, id string) (Job, error) {
@@ -266,11 +343,13 @@ func (q *JobQueue) Retry(ctx context.Context, id string) (Job, error) {
 		return Job{}, errors.New("job not found")
 	}
 
-	updated, err := job.Transition(JobStatusRunning, q.now(), "")
+	now := q.now()
+	updated, err := job.Transition(JobStatusRunning, now, "")
 	if err != nil {
 		q.mu.Unlock()
 		return Job{}, err
 	}
+	updated = q.stampRunningOwnership(updated, now)
 	if err := persistJob(ctx, q.store, updated); err != nil {
 		q.mu.Unlock()
 		return Job{}, err
@@ -326,6 +405,7 @@ func (q *JobQueue) Cancel(ctx context.Context, id string) (Job, error) {
 		q.mu.Unlock()
 		return Job{}, err
 	}
+	updated = clearJobOwnership(updated)
 	if err := persistJob(ctx, q.store, updated); err != nil {
 		q.mu.Unlock()
 		return Job{}, err
@@ -459,7 +539,7 @@ func (q *JobQueue) Restore(ctx context.Context) error {
 	return nil
 }
 
-func (q *JobQueue) transition(ctx context.Context, id string, next JobStatus, reason string) (Job, error) {
+func (q *JobQueue) transition(ctx context.Context, id string, next JobStatus, reason string, reasonCode JobReasonCode) (Job, error) {
 	q.mu.Lock()
 
 	job, exists := q.jobs[id]
@@ -468,10 +548,20 @@ func (q *JobQueue) transition(ctx context.Context, id string, next JobStatus, re
 		return Job{}, errors.New("job not found")
 	}
 
-	updated, err := job.Transition(next, q.now(), reason)
+	now := q.now()
+	updated, err := job.Transition(next, now, reason)
 	if err != nil {
 		q.mu.Unlock()
 		return Job{}, err
+	}
+	switch next {
+	case JobStatusRunning:
+		updated = q.stampRunningOwnership(updated, now)
+	case JobStatusDone, JobStatusCancelled:
+		updated = clearJobOwnership(updated)
+	}
+	if reasonCode != "" {
+		updated.ReasonCode = reasonCode
 	}
 	if err := persistJob(ctx, q.store, updated); err != nil {
 		q.mu.Unlock()
@@ -487,17 +577,29 @@ func (q *JobQueue) transition(ctx context.Context, id string, next JobStatus, re
 func (q *JobQueue) recoverJob(job Job, at time.Time) (Job, bool, error) {
 	switch job.Status {
 	case JobStatusRunning:
+		reasonCode := JobReasonCodeRuntimeRestart
+		reasonText := recoveryReasonRuntimeRestart
+		if leaseExpired(job, at) {
+			reasonCode = JobReasonCodeWorkerAbandoned
+			workerID := strings.TrimSpace(job.WorkerID)
+			if workerID == "" {
+				workerID = "unknown-worker"
+			}
+			reasonText = fmt.Sprintf("worker %s lease abandoned during runtime restart", workerID)
+		}
 		if job.RetryCount < job.MaxRetries {
-			updated, err := job.Transition(JobStatusRetrying, at, recoveryReasonRuntimeRestart)
+			updated, err := job.Transition(JobStatusRetrying, at, reasonText)
 			if err != nil {
 				return Job{}, false, err
 			}
+			updated = q.applyFailureMetadata(updated, reasonCode)
 			return updated, true, nil
 		}
-		updated, err := job.Transition(JobStatusDead, at, recoveryReasonRuntimeRestart)
+		updated, err := job.Transition(JobStatusDead, at, reasonText)
 		if err != nil {
 			return Job{}, false, err
 		}
+		updated = q.applyFailureMetadata(updated, reasonCode)
 		return updated, true, nil
 	default:
 		return job, false, nil
@@ -577,11 +679,89 @@ func reviveDeadLetterJob(job Job) Job {
 	updated := job
 	updated.Status = JobStatusPending
 	updated.LastError = ""
+	updated.ReasonCode = ""
 	updated.StartedAt = nil
 	updated.FinishedAt = nil
 	updated.NextRunAt = nil
 	updated.DeadLetter = false
+	updated = clearJobOwnership(updated)
 	return updated
+}
+
+func executionReasonCode(job Job) JobReasonCode {
+	if job.RetryCount < job.MaxRetries {
+		return JobReasonCodeExecutionRetry
+	}
+	return JobReasonCodeExecutionDead
+}
+
+func deadReasonCode(reasonCode JobReasonCode) JobReasonCode {
+	switch reasonCode {
+	case JobReasonCodeDispatchRetry:
+		return JobReasonCodeDispatchDead
+	case JobReasonCodeExecutionRetry:
+		return JobReasonCodeExecutionDead
+	default:
+		return reasonCode
+	}
+}
+
+func (q *JobQueue) stampRunningOwnership(job Job, at time.Time) Job {
+	updated := job
+	updated.LastError = ""
+	updated.ReasonCode = ""
+	updated.WorkerID = q.workerID
+	leaseAcquiredAt := at.UTC()
+	heartbeatAt := leaseAcquiredAt
+	updated.LeaseAcquiredAt = &leaseAcquiredAt
+	updated.HeartbeatAt = &heartbeatAt
+	updated = q.extendLeaseExpiry(updated, heartbeatAt)
+	return updated
+}
+
+func (q *JobQueue) renewLease(job Job, at time.Time) Job {
+	updated := job
+	heartbeatAt := at.UTC()
+	updated.HeartbeatAt = &heartbeatAt
+	if updated.LeaseAcquiredAt == nil || updated.LeaseAcquiredAt.IsZero() {
+		leaseAcquiredAt := heartbeatAt
+		updated.LeaseAcquiredAt = &leaseAcquiredAt
+	}
+	if strings.TrimSpace(updated.WorkerID) == "" {
+		updated.WorkerID = q.workerID
+	}
+	updated = q.extendLeaseExpiry(updated, heartbeatAt)
+	return updated
+}
+
+func (q *JobQueue) extendLeaseExpiry(job Job, base time.Time) Job {
+	updated := job
+	leaseExpiresAt := base.UTC().Add(q.leaseTTL)
+	updated.LeaseExpiresAt = &leaseExpiresAt
+	return updated
+}
+
+func (q *JobQueue) applyFailureMetadata(job Job, reasonCode JobReasonCode) Job {
+	updated := job
+	updated.ReasonCode = reasonCode
+	updated = clearJobOwnership(updated)
+	return updated
+}
+
+func clearJobOwnership(job Job) Job {
+	updated := job
+	updated.WorkerID = ""
+	updated.LeaseAcquiredAt = nil
+	updated.LeaseExpiresAt = nil
+	updated.HeartbeatAt = nil
+	return updated
+}
+
+func leaseExpired(job Job, at time.Time) bool {
+	if job.LeaseExpiresAt == nil || job.LeaseExpiresAt.IsZero() {
+		return false
+	}
+	return !job.LeaseExpiresAt.After(at)
 }
 
 func (q *JobQueue) syncMetricsLocked() {
@@ -619,18 +799,23 @@ func (q *JobQueue) observeLifecycle(message string, job Job) {
 	}
 	if q.logger != nil {
 		_ = q.logger.Log("info", message, ctx, map[string]any{
-			"job_id":      job.ID,
-			"job_type":    job.Type,
-			"job_status":  job.Status,
-			"retry_count": job.RetryCount,
-			"dead_letter": job.DeadLetter,
+			"job_id":       job.ID,
+			"job_type":     job.Type,
+			"job_status":   job.Status,
+			"retry_count":  job.RetryCount,
+			"dead_letter":  job.DeadLetter,
+			"reason_code":  job.ReasonCode,
+			"worker_id":    job.WorkerID,
+			"heartbeat_at": nullableLogTime(job.HeartbeatAt),
 		})
 	}
 	if q.tracer != nil {
 		finish := q.tracer.StartSpan(ctx.TraceID, "job.lifecycle", ctx.EventID, "", "", ctx.CorrelationID, map[string]any{
-			"job_id":     job.ID,
-			"job_type":   job.Type,
-			"job_status": job.Status,
+			"job_id":      job.ID,
+			"job_type":    job.Type,
+			"job_status":  job.Status,
+			"reason_code": job.ReasonCode,
+			"worker_id":   job.WorkerID,
 		})
 		finish()
 	}
@@ -654,4 +839,11 @@ func simpleBackoff(retryCount int) time.Duration {
 		retryCount = 1
 	}
 	return time.Duration(retryCount) * time.Second
+}
+
+func nullableLogTime(value *time.Time) any {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }

@@ -482,22 +482,27 @@ func TestSQLiteStateStorePersistsJobsRoundTrip(t *testing.T) {
 	createdAt := time.Date(2026, 4, 7, 10, 0, 0, 0, time.UTC)
 	nextRunAt := time.Date(2026, 4, 7, 10, 0, 5, 0, time.UTC)
 	job := Job{
-		ID:          "job-roundtrip-1",
-		Type:        "ai.chat",
-		TraceID:     "trace-roundtrip-1",
-		EventID:     "evt-roundtrip-1",
-		RunID:       "run-roundtrip-1",
-		Status:      JobStatusRetrying,
-		Payload:     map[string]any{"prompt": "hello", "attempt": float64(1)},
-		RetryCount:  1,
-		MaxRetries:  3,
-		Timeout:     45 * time.Second,
-		LastError:   "mock upstream failure",
-		CreatedAt:   createdAt,
-		StartedAt:   &startedAt,
-		NextRunAt:   &nextRunAt,
-		DeadLetter:  false,
-		Correlation: "corr-roundtrip-1",
+		ID:              "job-roundtrip-1",
+		Type:            "ai.chat",
+		TraceID:         "trace-roundtrip-1",
+		EventID:         "evt-roundtrip-1",
+		RunID:           "run-roundtrip-1",
+		Status:          JobStatusRetrying,
+		Payload:         map[string]any{"prompt": "hello", "attempt": float64(1)},
+		RetryCount:      1,
+		MaxRetries:      3,
+		Timeout:         45 * time.Second,
+		LastError:       "mock upstream failure",
+		ReasonCode:      JobReasonCodeExecutionRetry,
+		CreatedAt:       createdAt,
+		StartedAt:       &startedAt,
+		NextRunAt:       &nextRunAt,
+		WorkerID:        "runtime-local:test-worker",
+		LeaseAcquiredAt: &startedAt,
+		LeaseExpiresAt:  &nextRunAt,
+		HeartbeatAt:     &startedAt,
+		DeadLetter:      false,
+		Correlation:     "corr-roundtrip-1",
 	}
 
 	if err := store.SaveJob(context.Background(), job); err != nil {
@@ -517,11 +522,17 @@ func TestSQLiteStateStorePersistsJobsRoundTrip(t *testing.T) {
 	if loaded.TraceID != job.TraceID || loaded.EventID != job.EventID || loaded.RunID != job.RunID || loaded.Correlation != job.Correlation {
 		t.Fatalf("expected trace fields to round-trip, got %+v", loaded)
 	}
-	if loaded.LastError != job.LastError || loaded.DeadLetter != job.DeadLetter {
+	if loaded.LastError != job.LastError || loaded.DeadLetter != job.DeadLetter || loaded.ReasonCode != job.ReasonCode {
 		t.Fatalf("expected error/dead-letter fields to round-trip, got %+v", loaded)
+	}
+	if loaded.WorkerID != job.WorkerID {
+		t.Fatalf("expected worker id to round-trip, got %+v", loaded)
 	}
 	if !loaded.CreatedAt.Equal(createdAt) || loaded.StartedAt == nil || !loaded.StartedAt.Equal(startedAt) || loaded.NextRunAt == nil || !loaded.NextRunAt.Equal(nextRunAt) {
 		t.Fatalf("expected timestamps to round-trip, got %+v", loaded)
+	}
+	if loaded.LeaseAcquiredAt == nil || !loaded.LeaseAcquiredAt.Equal(startedAt) || loaded.LeaseExpiresAt == nil || !loaded.LeaseExpiresAt.Equal(nextRunAt) || loaded.HeartbeatAt == nil || !loaded.HeartbeatAt.Equal(startedAt) {
+		t.Fatalf("expected lease timestamps to round-trip, got %+v", loaded)
 	}
 	if loaded.Payload["prompt"] != "hello" {
 		t.Fatalf("expected payload to round-trip, got %+v", loaded.Payload)

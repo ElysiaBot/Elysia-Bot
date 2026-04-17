@@ -70,6 +70,8 @@ type JobInvocation struct {
 
 type JobStatus string
 
+type JobReasonCode string
+
 const (
 	JobStatusPending   JobStatus = "pending"
 	JobStatusRunning   JobStatus = "running"
@@ -78,26 +80,39 @@ const (
 	JobStatusFailed    JobStatus = "failed"
 	JobStatusDead      JobStatus = "dead"
 	JobStatusDone      JobStatus = "done"
+
+	JobReasonCodeRuntimeRestart  JobReasonCode = "runtime_restart"
+	JobReasonCodeWorkerAbandoned JobReasonCode = "worker_abandoned"
+	JobReasonCodeTimeout         JobReasonCode = "timeout"
+	JobReasonCodeDispatchRetry   JobReasonCode = "dispatch_retry"
+	JobReasonCodeDispatchDead    JobReasonCode = "dispatch_dead"
+	JobReasonCodeExecutionRetry  JobReasonCode = "execution_retry"
+	JobReasonCodeExecutionDead   JobReasonCode = "execution_dead"
 )
 
 type Job struct {
-	ID          string         `json:"id"`
-	Type        string         `json:"type"`
-	TraceID     string         `json:"traceId,omitempty"`
-	EventID     string         `json:"eventId,omitempty"`
-	RunID       string         `json:"runId,omitempty"`
-	Status      JobStatus      `json:"status"`
-	Payload     map[string]any `json:"payload,omitempty"`
-	RetryCount  int            `json:"retryCount"`
-	MaxRetries  int            `json:"maxRetries"`
-	Timeout     time.Duration  `json:"timeout"`
-	LastError   string         `json:"lastError,omitempty"`
-	CreatedAt   time.Time      `json:"createdAt"`
-	StartedAt   *time.Time     `json:"startedAt,omitempty"`
-	FinishedAt  *time.Time     `json:"finishedAt,omitempty"`
-	NextRunAt   *time.Time     `json:"nextRunAt,omitempty"`
-	DeadLetter  bool           `json:"deadLetter"`
-	Correlation string         `json:"correlation,omitempty"`
+	ID              string         `json:"id"`
+	Type            string         `json:"type"`
+	TraceID         string         `json:"traceId,omitempty"`
+	EventID         string         `json:"eventId,omitempty"`
+	RunID           string         `json:"runId,omitempty"`
+	Status          JobStatus      `json:"status"`
+	Payload         map[string]any `json:"payload,omitempty"`
+	RetryCount      int            `json:"retryCount"`
+	MaxRetries      int            `json:"maxRetries"`
+	Timeout         time.Duration  `json:"timeout"`
+	LastError       string         `json:"lastError,omitempty"`
+	ReasonCode      JobReasonCode  `json:"reasonCode,omitempty"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	StartedAt       *time.Time     `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time     `json:"finishedAt,omitempty"`
+	NextRunAt       *time.Time     `json:"nextRunAt,omitempty"`
+	WorkerID        string         `json:"workerId,omitempty"`
+	LeaseAcquiredAt *time.Time     `json:"leaseAcquiredAt,omitempty"`
+	LeaseExpiresAt  *time.Time     `json:"leaseExpiresAt,omitempty"`
+	HeartbeatAt     *time.Time     `json:"heartbeatAt,omitempty"`
+	DeadLetter      bool           `json:"deadLetter"`
+	Correlation     string         `json:"correlation,omitempty"`
 }
 
 func NewJob(id, jobType string, maxRetries int, timeout time.Duration) Job {

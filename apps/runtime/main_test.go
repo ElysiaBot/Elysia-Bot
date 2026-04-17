@@ -99,6 +99,15 @@ type runtimeConsoleResponse struct {
 		Online         bool           `json:"online"`
 		StatePersisted bool           `json:"statePersisted"`
 	} `json:"adapters"`
+	Jobs []struct {
+		ID              string `json:"id"`
+		Status          string `json:"status"`
+		DeadLetter      bool   `json:"deadLetter"`
+		WorkerID        string `json:"workerId"`
+		ReasonCode      string `json:"reasonCode"`
+		LeaseSummary    string `json:"leaseSummary"`
+		RecoverySummary string `json:"recoverySummary"`
+	} `json:"jobs"`
 	Schedules []struct {
 		ID string `json:"id"`
 	} `json:"schedules"`
@@ -106,6 +115,7 @@ type runtimeConsoleResponse struct {
 		Adapters  int `json:"adapters"`
 		Schedules int `json:"schedules"`
 	} `json:"status"`
+	Meta map[string]any `json:"meta"`
 }
 
 type runtimeHealthTestResponse struct {
@@ -2316,6 +2326,62 @@ func TestRuntimeAppQueueDispatcherUsesRuntimeMethod(t *testing.T) {
 	}
 }
 
+func TestRuntimeAppConsoleShowsWorkerLeaseFactsForRunningJob(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	job := runtimecore.NewJob("job-console-running-worker", "demo.echo", 1, 30*time.Second)
+	if err := app.queue.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := app.queue.MarkRunning(t.Context(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	payload := readRuntimeConsoleResponse(t, app)
+	for _, consoleJob := range payload.Jobs {
+		if consoleJob.ID == job.ID {
+			if consoleJob.WorkerID == "" || !strings.Contains(consoleJob.LeaseSummary, "worker=") {
+				t.Fatalf("expected console worker lease facts for running job, got %+v", consoleJob)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected running job in console payload, got %+v", payload.Jobs)
+}
+
+func TestRuntimeAppConsoleMetaExposesNonHostnameWorkerIdentity(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	payload := readRuntimeConsoleResponse(t, app)
+	runtimeWorkerID, _ := payload.Meta["runtime_worker_id"].(string)
+	jobWorkerIdentity, _ := payload.Meta["job_worker_identity"].(string)
+	if runtimeWorkerID == "" || jobWorkerIdentity == "" {
+		t.Fatalf("expected worker identity visibility in console meta, got %+v", payload.Meta)
+	}
+	if runtimeWorkerID != jobWorkerIdentity {
+		t.Fatalf("expected console meta worker identity fields to agree, got runtime=%q job=%q", runtimeWorkerID, jobWorkerIdentity)
+	}
+	hostname, _ := os.Hostname()
+	if hostname != "" && strings.Contains(strings.ToLower(runtimeWorkerID), strings.ToLower(strings.TrimSpace(hostname))) {
+		t.Fatalf("expected worker identity to avoid hostname disclosure, got worker_id=%q hostname=%q", runtimeWorkerID, hostname)
+	}
+	if !strings.HasPrefix(runtimeWorkerID, "runtime-local:") {
+		t.Fatalf("expected runtime-local worker identity prefix, got %q", runtimeWorkerID)
+	}
+}
+
 func TestJobQueueDispatchReadyIgnoresJobTypeWithoutDispatcher(t *testing.T) {
 	t.Parallel()
 
@@ -2449,6 +2515,21 @@ func TestRuntimeAppRestartRecoversRunningJobState(t *testing.T) {
 	if _, err := app.queue.MarkRunning(t.Context(), job.ID); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
+	runningBeforeClose, err := app.queue.Inspect(t.Context(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect running job before restart: %v", err)
+	}
+	if runningBeforeClose.WorkerID == "" || runningBeforeClose.LeaseAcquiredAt == nil || runningBeforeClose.HeartbeatAt == nil {
+		t.Fatalf("expected running job ownership facts before restart, got %+v", runningBeforeClose)
+	}
+	if runningBeforeClose.LeaseExpiresAt == nil {
+		t.Fatalf("expected lease expiry before restart, got %+v", runningBeforeClose)
+	}
+	expiredLeaseAt := time.Now().UTC().Add(-1 * time.Second)
+	runningBeforeClose.LeaseExpiresAt = &expiredLeaseAt
+	if err := app.state.SaveJob(t.Context(), runningBeforeClose); err != nil {
+		t.Fatalf("persist expired lease before restart: %v", err)
+	}
 	if err := app.Close(); err != nil {
 		t.Fatalf("close first app: %v", err)
 	}
@@ -2466,24 +2547,22 @@ func TestRuntimeAppRestartRecoversRunningJobState(t *testing.T) {
 	if restored.Status != runtimecore.JobStatusRetrying || restored.RetryCount != 1 || restored.NextRunAt == nil {
 		t.Fatalf("expected running job to recover as retrying, got %+v", restored)
 	}
-	if !strings.Contains(restored.LastError, "runtime restarted") {
+	if restored.ReasonCode != runtimecore.JobReasonCodeWorkerAbandoned || !strings.Contains(restored.LastError, "lease abandoned") {
 		t.Fatalf("expected restart recovery reason, got %+v", restored)
 	}
-	consoleReq := httptest.NewRequest(http.MethodGet, "/api/console", nil)
-	consoleResp := httptest.NewRecorder()
-	restarted.ServeHTTP(consoleResp, consoleReq)
-	for _, expected := range []string{
-		"job-restart-running",
-		`"recoverySummary": "retrying after runtime restart"`,
-		`"recoveredJobs": 1`,
-		`"recoveredRunning": 1`,
-		`"retriedJobs": 1`,
-		`"job_recovery_source": "runtime-startup-restore"`,
-		`"job_recovery_recovered_jobs": 1`,
-	} {
-		if !strings.Contains(consoleResp.Body.String(), expected) {
-			t.Fatalf("expected console recovery payload %q, got %s", expected, consoleResp.Body.String())
+	payload := readRuntimeConsoleResponse(t, restarted)
+	jobVisible := false
+	for _, consoleJob := range payload.Jobs {
+		if consoleJob.ID == "job-restart-running" {
+			jobVisible = true
+			if consoleJob.ReasonCode != "worker_abandoned" || !strings.Contains(consoleJob.RecoverySummary, "reason_code=worker_abandoned") {
+				t.Fatalf("expected console recovery reason visibility, got %+v", consoleJob)
+			}
+			break
 		}
+	}
+	if !jobVisible {
+		t.Fatalf("expected restored job in console payload, got %+v", payload.Jobs)
 	}
 }
 
@@ -2550,6 +2629,43 @@ func TestRuntimeAppRestartRecoveryIsVisibleInLogsMetricsAndTrace(t *testing.T) {
 	}
 	if !strings.Contains(metricsOutput, `bot_platform_job_status_total{status="retrying"} 1`) {
 		t.Fatalf("expected retrying metric after recovery, got %s", metricsOutput)
+	}
+}
+
+func TestRuntimeAppRestartRecoveryKeepsRuntimeRestartReasonWhenLeaseNotExpired(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	configPath := writeTestConfigAt(t, dir)
+
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+
+	job := runtimecore.NewJob("job-restart-runtime-reason", "ai.chat", 1, 30*time.Second)
+	if err := app.queue.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue job: %v", err)
+	}
+	if _, err := app.queue.MarkRunning(t.Context(), job.ID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	restarted, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("restart runtime app: %v", err)
+	}
+	defer func() { _ = restarted.Close() }()
+
+	restored, err := restarted.queue.Inspect(t.Context(), job.ID)
+	if err != nil {
+		t.Fatalf("inspect restored job: %v", err)
+	}
+	if restored.ReasonCode != runtimecore.JobReasonCodeRuntimeRestart || !strings.Contains(restored.LastError, "runtime restarted") {
+		t.Fatalf("expected runtime restart classification for unexpired lease, got %+v", restored)
 	}
 }
 

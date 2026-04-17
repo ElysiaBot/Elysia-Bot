@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -379,6 +381,7 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 	audits := runtimecore.NewInMemoryAuditLog()
 	queue := runtimecore.NewJobQueue()
 	queue.SetObservability(logger, tracer, metrics)
+	queue.SetWorkerIdentity(runtimeWorkerID())
 	state, err := runtimecore.OpenSQLiteStateStore(settings.SQLitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite state store: %w", err)
@@ -518,6 +521,7 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 			"smoke_store_debug_scope": "event_journal+idempotency_keys",
 			"scheduler_interval_ms":   settings.SchedulerIntervalMs,
 			"ai_job_dispatcher":       "runtime-job-queue",
+			"runtime_worker_id":       runtimeWorkerID(),
 			"console_mode":            "read+operator-plugin-enable-disable",
 		},
 		mux: http.NewServeMux(),
@@ -701,6 +705,10 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["job_read_model"] = "sqlite"
 	meta["job_status_source"] = "sqlite-jobs"
 	meta["job_status_persisted"] = true
+	meta["job_worker_model"] = "runtime-local-worker-lease"
+	meta["job_worker_identity"] = runtimeWorkerID()
+	meta["job_worker_lease_visibility"] = true
+	meta["job_recovery_reason_codes"] = []string{"runtime_restart", "worker_abandoned", "timeout", "dispatch_retry", "dispatch_dead", "execution_retry", "execution_dead"}
 	meta["job_recovery_source"] = "runtime-startup-restore"
 	meta["job_recovery_reason"] = "running jobs are retried or dead-lettered after restart"
 	meta["job_recovery_recovered_jobs"] = recovery.RecoveredJobs
@@ -1696,6 +1704,26 @@ func loadAppRuntimeSettings(cfg runtimecore.Config) appRuntimeSettings {
 		settings.SchedulerIntervalMs = 100
 	}
 	return settings
+}
+
+func runtimeWorkerID() string {
+	runtimeWorkerIDOnce.Do(func() {
+		runtimeWorkerIDValue = "runtime-local:" + randomRuntimeWorkerSuffix()
+	})
+	return runtimeWorkerIDValue
+}
+
+var (
+	runtimeWorkerIDOnce  sync.Once
+	runtimeWorkerIDValue string
+)
+
+func randomRuntimeWorkerSuffix() string {
+	buffer := make([]byte, 8)
+	if _, err := rand.Read(buffer); err == nil {
+		return hex.EncodeToString(buffer)
+	}
+	return fmt.Sprintf("ephemeral-%d", time.Now().UTC().UnixNano())
 }
 
 func openRuntimeSmokeStore(settings appRuntimeSettings, sqliteState *runtimecore.SQLiteStateStore) (runtimeSmokeStore, error) {

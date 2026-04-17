@@ -547,7 +547,9 @@ func (r *InMemoryRuntime) DispatchJob(ctx context.Context, job pluginsdk.JobInvo
 type QueuedJobFailureTransitioner interface {
 	Inspect(context.Context, string) (Job, error)
 	MarkRunning(context.Context, string) (Job, error)
+	Heartbeat(context.Context, string) (Job, error)
 	Fail(context.Context, string, string) (Job, error)
+	FailWithReasonCode(context.Context, string, string, JobReasonCode) (Job, error)
 }
 
 func DispatchQueuedJob(ctx context.Context, runtime *InMemoryRuntime, queue QueuedJobFailureTransitioner, job Job) error {
@@ -558,6 +560,9 @@ func DispatchQueuedJob(ctx context.Context, runtime *InMemoryRuntime, queue Queu
 }
 
 func (r *InMemoryRuntime) DispatchQueuedJob(ctx context.Context, queue QueuedJobFailureTransitioner, job Job) error {
+	stopHeartbeat := startQueuedJobHeartbeat(ctx, queue, job)
+	defer stopHeartbeat()
+
 	invocation, executionContext, err := queuedJobDispatchInput(job)
 	if err != nil {
 		transitionErr := transitionQueuedJobDispatchFailure(ctx, queue, job, err)
@@ -571,6 +576,33 @@ func (r *InMemoryRuntime) DispatchQueuedJob(ctx context.Context, queue QueuedJob
 		return combineQueuedDispatchErrors(err, transitionErr)
 	}
 	return err
+}
+
+func startQueuedJobHeartbeat(ctx context.Context, queue QueuedJobFailureTransitioner, job Job) func() {
+	if queue == nil || job.Status != JobStatusRunning || job.Timeout <= 0 {
+		return func() {}
+	}
+	interval := job.Timeout / 3
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				_, _ = queue.Heartbeat(context.Background(), job.ID)
+			}
+		}
+	}()
+	return cancel
 }
 
 func (r *InMemoryRuntime) logQueuedDispatchFailure(job Job, dispatchErr error, transitionErr error) {
@@ -603,13 +635,25 @@ func transitionQueuedJobDispatchFailure(ctx context.Context, queue QueuedJobFail
 		return nil
 	}
 	stored, err := queue.Inspect(ctx, original.ID)
-	if err != nil || !queuedJobDispatchStateUnchanged(original, stored) {
+	if err != nil {
 		return err
 	}
-	if _, runningErr := queue.MarkRunning(ctx, original.ID); runningErr != nil {
-		return fmt.Errorf("mark queued job %q running after dispatch failure: %w", original.ID, runningErr)
+	if stored.Status == JobStatusPending && queuedJobDispatchStateUnchanged(original, stored) {
+		if _, runningErr := queue.MarkRunning(ctx, original.ID); runningErr != nil {
+			return fmt.Errorf("mark queued job %q running after dispatch failure: %w", original.ID, runningErr)
+		}
+		stored, err = queue.Inspect(ctx, original.ID)
+		if err != nil {
+			return err
+		}
 	}
-	if _, failErr := queue.Fail(ctx, original.ID, dispatchErr.Error()); failErr != nil {
+	if stored.Status != JobStatusRunning {
+		return nil
+	}
+	if original.Status == JobStatusRunning && !queuedJobDispatchOwnershipStateUnchanged(original, stored) {
+		return nil
+	}
+	if _, failErr := queue.FailWithReasonCode(ctx, original.ID, dispatchErr.Error(), dispatchReasonCode(stored)); failErr != nil {
 		return fmt.Errorf("fail queued job %q after dispatch failure: %w", original.ID, failErr)
 	}
 	return nil
@@ -626,6 +670,19 @@ func combineQueuedDispatchErrors(primary error, transitionErr error) error {
 }
 
 func queuedJobDispatchStateUnchanged(before, after Job) bool {
+	if !queuedJobDispatchOwnershipStateUnchanged(before, after) {
+		return false
+	}
+	if !sameQueuedJobTime(before.LeaseExpiresAt, after.LeaseExpiresAt) {
+		return false
+	}
+	if !sameQueuedJobTime(before.HeartbeatAt, after.HeartbeatAt) {
+		return false
+	}
+	return true
+}
+
+func queuedJobDispatchOwnershipStateUnchanged(before, after Job) bool {
 	if before.Status != after.Status {
 		return false
 	}
@@ -644,7 +701,20 @@ func queuedJobDispatchStateUnchanged(before, after Job) bool {
 	if !sameQueuedJobTime(before.NextRunAt, after.NextRunAt) {
 		return false
 	}
+	if before.ReasonCode != after.ReasonCode || before.WorkerID != after.WorkerID {
+		return false
+	}
+	if !sameQueuedJobTime(before.LeaseAcquiredAt, after.LeaseAcquiredAt) {
+		return false
+	}
 	return before.DeadLetter == after.DeadLetter
+}
+
+func dispatchReasonCode(job Job) JobReasonCode {
+	if job.RetryCount < job.MaxRetries {
+		return JobReasonCodeDispatchRetry
+	}
+	return JobReasonCodeDispatchDead
 }
 
 func sameQueuedJobTime(left, right *time.Time) bool {

@@ -10,14 +10,6 @@
 
 ## Active
 
-### A1. worker 级 job 执行与恢复语义
-- 目标：把当前单进程 dev-worker 风格的 job 执行链路，推进到更清晰的 worker 级语义。
-- 直接子步骤：
-  - 为 running job 引入更明确的 ownership / lease / heartbeat 语义。
-  - 区分 crash、timeout、abandon、retrying 的恢复来源，而不是继续只靠当前最小分类。
-  - 让 `/api/console` 能看到 worker/lease 级别的运行事实，而不只是 job 最终状态。
-  - 增加与 restart / crash / retry 相关的 focused tests，覆盖真实恢复路径。
-
 ---
 
 ## Backlog
