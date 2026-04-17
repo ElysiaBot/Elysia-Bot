@@ -245,6 +245,17 @@ func writeScheduleCancelRBACConfig(t *testing.T) string {
 	return path
 }
 
+func writeWriteActionRBACConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "runtime:\n  environment: test\n  log_level: debug\n  http_port: 18080\n  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n  scheduler_interval_ms: 20\nrbac:\n  actor_roles:\n    job-operator: [job-operator]\n    config-operator: [config-operator]\n    viewer-user: [viewer]\n  policies:\n    job-operator:\n      permissions: [job:retry]\n      plugin_scope: ['*']\n    config-operator:\n      permissions: [plugin:config]\n      plugin_scope: ['plugin-echo']\n    viewer:\n      permissions: [console:read]\n      plugin_scope: ['console']\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
 func decodeRuntimeConfigCheckResult(t *testing.T, raw []byte) runtimeConfigCheckResult {
 	t.Helper()
 	var result runtimeConfigCheckResult
@@ -817,7 +828,7 @@ func TestRuntimeAppOperatorDisablePersistsOverlaySkipsDispatchAndReEnables(t *te
 func TestRuntimeAppPluginEchoConfigOperatorRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	app, err := newRuntimeApp(writeTestConfig(t))
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
 	if err != nil {
 		t.Fatalf("new runtime app: %v", err)
 	}
@@ -825,6 +836,7 @@ func TestRuntimeAppPluginEchoConfigOperatorRejectsInvalidConfig(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":true}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(runtimecore.ConsoleReadActorHeader, "config-operator")
 	resp := httptest.NewRecorder()
 
 	app.ServeHTTP(resp, req)
@@ -837,6 +849,9 @@ func TestRuntimeAppPluginEchoConfigOperatorRejectsInvalidConfig(t *testing.T) {
 	}
 	if _, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo"); err == nil {
 		t.Fatal("expected invalid config not to be persisted")
+	}
+	if entries := app.audits.AuditEntries(); len(entries) != 0 {
+		t.Fatalf("expected invalid config to avoid allow/deny audit records, got %+v", entries)
 	}
 }
 
@@ -992,7 +1007,7 @@ func TestRuntimeAppConsoleAllowsConfiguredActorHeader(t *testing.T) {
 func TestRuntimeAppSkipsDuplicateIdempotencyKey(t *testing.T) {
 	t.Parallel()
 
-	app, err := newRuntimeApp(writeTestConfig(t))
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
 	if err != nil {
 		t.Fatalf("new runtime app: %v", err)
 	}
@@ -1155,7 +1170,7 @@ func TestRuntimeAppDeadLetterAlertAppearsInConsole(t *testing.T) {
 func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecordsDistinctAudit(t *testing.T) {
 	t.Parallel()
 
-	app, err := newRuntimeApp(writeTestConfig(t))
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
 	if err != nil {
 		t.Fatalf("new runtime app: %v", err)
 	}
@@ -1186,7 +1201,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 	if retryResp.Code != http.StatusOK {
 		t.Fatalf("expected retry operator 200, got %d: %s", retryResp.Code, retryResp.Body.String())
 	}
-	for _, expected := range []string{`"status":"ok"`, `"job_id":"job-dead-retry-console"`, `"action":"retry"`, `"accepted":true`} {
+	for _, expected := range []string{`"status":"ok"`, `"action":"retry"`, `"target":"job-dead-retry-console"`, `"accepted":true`, `"reason":"job_dead_letter_retried"`, `"job_id":"job-dead-retry-console"`} {
 		if !strings.Contains(retryResp.Body.String(), expected) && !strings.Contains(retryResp.Body.String(), strings.ReplaceAll(expected, `:`, `: `)) {
 			t.Fatalf("expected retry response to include %s, got %s", expected, retryResp.Body.String())
 		}
@@ -1271,7 +1286,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 		t.Fatal("expected retry operator to record audit evidence")
 	}
 	lastEntry := entries[len(entries)-1]
-	if lastEntry.Actor != "job-operator" || lastEntry.Action != "retry" || lastEntry.Target != "job-dead-retry-console" || !lastEntry.Allowed || lastEntry.Reason != "job_dead_letter_retried" {
+	if lastEntry.Actor != "job-operator" || lastEntry.Permission != "job:retry" || lastEntry.Action != "retry" || lastEntry.Target != "job-dead-retry-console" || !lastEntry.Allowed || lastEntry.Reason != "job_dead_letter_retried" {
 		t.Fatalf("expected distinct retry audit entry, got %+v", lastEntry)
 	}
 	if lastEntry.Action == "replay" || strings.Contains(lastEntry.Reason, "replay") {
@@ -1289,7 +1304,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafely(t *testing.T) {
 	t.Parallel()
 
-	app, err := newRuntimeApp(writeTestConfig(t))
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
 	if err != nil {
 		t.Fatalf("new runtime app: %v", err)
 	}
@@ -1311,6 +1326,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafe
 	}
 
 	firstRetryReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/job-dead-retry-once/retry", nil)
+	firstRetryReq.Header.Set(runtimecore.ConsoleReadActorHeader, "job-operator")
 	firstRetryResp := httptest.NewRecorder()
 	app.ServeHTTP(firstRetryResp, firstRetryReq)
 	if firstRetryResp.Code != http.StatusOK {
@@ -1318,6 +1334,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafe
 	}
 
 	secondRetryReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/job-dead-retry-once/retry", nil)
+	secondRetryReq.Header.Set(runtimecore.ConsoleReadActorHeader, "job-operator")
 	secondRetryResp := httptest.NewRecorder()
 	app.ServeHTTP(secondRetryResp, secondRetryReq)
 	if secondRetryResp.Code != http.StatusBadRequest {
@@ -1328,6 +1345,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafe
 	}
 
 	missingRetryReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/job-missing-retry/retry", nil)
+	missingRetryReq.Header.Set(runtimecore.ConsoleReadActorHeader, "job-operator")
 	missingRetryResp := httptest.NewRecorder()
 	app.ServeHTTP(missingRetryResp, missingRetryReq)
 	if missingRetryResp.Code != http.StatusNotFound {
@@ -1345,6 +1363,127 @@ func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafe
 	}
 	if allowedRetries != 1 {
 		t.Fatalf("expected exactly one accepted retry audit entry, got %+v", entries)
+	}
+}
+
+func TestRuntimeAppRetryDeadLetterOperatorReturnsForbiddenAndRecordsDeniedAudit(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	enqueueReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-dead-retry-denied","type":"ai.chat","prompt":"deny retry","user_id":"user-retry-denied","max_retries":0}`))
+	enqueueReq.Header.Set("Content-Type", "application/json")
+	enqueueResp := httptest.NewRecorder()
+	app.ServeHTTP(enqueueResp, enqueueReq)
+	if enqueueResp.Code != http.StatusOK {
+		t.Fatalf("expected enqueue 200, got %d: %s", enqueueResp.Code, enqueueResp.Body.String())
+	}
+
+	timeoutReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/timeout?id=job-dead-retry-denied", nil)
+	timeoutResp := httptest.NewRecorder()
+	app.ServeHTTP(timeoutResp, timeoutReq)
+	if timeoutResp.Code != http.StatusOK {
+		t.Fatalf("expected timeout 200, got %d: %s", timeoutResp.Code, timeoutResp.Body.String())
+	}
+
+	retryReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/job-dead-retry-denied/retry", nil)
+	retryReq.Header.Set(runtimecore.ConsoleReadActorHeader, "viewer-user")
+	retryResp := httptest.NewRecorder()
+	app.ServeHTTP(retryResp, retryReq)
+	if retryResp.Code != http.StatusForbidden {
+		t.Fatalf("expected denied retry 403, got %d: %s", retryResp.Code, retryResp.Body.String())
+	}
+	if !strings.Contains(retryResp.Body.String(), "permission denied") {
+		t.Fatalf("expected denied retry response to mention permission denied, got %s", retryResp.Body.String())
+	}
+	stored, err := app.queue.Inspect(t.Context(), "job-dead-retry-denied")
+	if err != nil {
+		t.Fatalf("inspect denied retry job: %v", err)
+	}
+	if stored.Status != runtimecore.JobStatusDead || !stored.DeadLetter {
+		t.Fatalf("expected denied retry to preserve dead-letter job state, got %+v", stored)
+	}
+	entries := app.audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one denied retry audit entry, got %+v", entries)
+	}
+	if entries[0].Actor != "viewer-user" || entries[0].Action != "job.retry" || entries[0].Permission != "job:retry" || entries[0].Target != "job-dead-retry-denied" || entries[0].Allowed || entries[0].Reason != "permission_denied" {
+		t.Fatalf("expected denied retry audit entry, got %+v", entries[0])
+	}
+}
+
+func TestRuntimeAppPluginEchoConfigOperatorPersistsConfigWithStableEnvelopeAndAllowAudit(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeWriteActionRBACConfig(t)
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	configReq := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":"persisted: "}`))
+	configReq.Header.Set("Content-Type", "application/json")
+	configReq.Header.Set(runtimecore.ConsoleReadActorHeader, "config-operator")
+	configResp := httptest.NewRecorder()
+	app.ServeHTTP(configResp, configReq)
+	if configResp.Code != http.StatusOK {
+		t.Fatalf("expected config operator 200, got %d: %s", configResp.Code, configResp.Body.String())
+	}
+	for _, expected := range []string{`"status":"ok"`, `"action":"config.update"`, `"target":"plugin-echo"`, `"accepted":true`, `"reason":"plugin_config_updated"`, `"plugin_id":"plugin-echo"`} {
+		if !strings.Contains(configResp.Body.String(), expected) && !strings.Contains(configResp.Body.String(), strings.ReplaceAll(expected, `:`, `: `)) {
+			t.Fatalf("expected config response to include %s, got %s", expected, configResp.Body.String())
+		}
+	}
+	stored, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo")
+	if err != nil {
+		t.Fatalf("load persisted plugin config: %v", err)
+	}
+	if string(stored.RawConfig) != `{"prefix":"persisted: "}` {
+		t.Fatalf("expected persisted raw config, got %s", string(stored.RawConfig))
+	}
+	entries := app.audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one allow audit entry for config update, got %+v", entries)
+	}
+	if entries[0].Actor != "config-operator" || entries[0].Action != "config.update" || entries[0].Permission != "plugin:config" || entries[0].Target != "plugin-echo" || !entries[0].Allowed || entries[0].Reason != "plugin_config_updated" {
+		t.Fatalf("expected config update audit entry, got %+v", entries[0])
+	}
+}
+
+func TestRuntimeAppPluginEchoConfigOperatorReturnsForbiddenAndRecordsDeniedAudit(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeWriteActionRBACConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	configReq := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":"denied: "}`))
+	configReq.Header.Set("Content-Type", "application/json")
+	configReq.Header.Set(runtimecore.ConsoleReadActorHeader, "viewer-user")
+	configResp := httptest.NewRecorder()
+	app.ServeHTTP(configResp, configReq)
+	if configResp.Code != http.StatusForbidden {
+		t.Fatalf("expected denied config update 403, got %d: %s", configResp.Code, configResp.Body.String())
+	}
+	if !strings.Contains(configResp.Body.String(), "permission denied") {
+		t.Fatalf("expected denied config update response to mention permission denied, got %s", configResp.Body.String())
+	}
+	if _, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo"); err == nil {
+		t.Fatal("expected denied config update not to persist plugin config")
+	}
+	entries := app.audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one denied config audit entry, got %+v", entries)
+	}
+	if entries[0].Actor != "viewer-user" || entries[0].Action != "plugin.config" || entries[0].Permission != "plugin:config" || entries[0].Target != "plugin-echo" || entries[0].Allowed || entries[0].Reason != "permission_denied" {
+		t.Fatalf("expected denied config audit entry, got %+v", entries[0])
 	}
 }
 

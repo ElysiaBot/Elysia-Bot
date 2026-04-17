@@ -153,7 +153,19 @@ func (s postgresRuntimeSmokeStore) Close() error {
 	return nil
 }
 
-const scheduleCancelPermission = "schedule:cancel"
+const (
+	scheduleCancelPermission = "schedule:cancel"
+	jobRetryPermission       = "job:retry"
+	pluginConfigPermission   = "plugin:config"
+)
+
+type operatorActionResult struct {
+	Status   string `json:"status"`
+	Action   string `json:"action"`
+	Target   string `json:"target"`
+	Accepted bool   `json:"accepted"`
+	Reason   string `json:"reason,omitempty"`
+}
 
 type aiProviderMock struct{}
 
@@ -857,6 +869,12 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "admin-user"
 	}
+	permission := jobOperatorPermission(action)
+	if err := runtimecore.AuthorizeRBACAction(a.config.RBAC, actor, permission, jobID); err != nil {
+		runtimecore.RecordAuthorizationDeniedAudit(a.audits, actor, permission, jobID, err)
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	retried, err := a.queue.RetryDeadLetter(r.Context(), jobID)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -869,6 +887,7 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 	if a.audits != nil {
 		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
 			Actor:      actor,
+			Permission: permission,
 			Action:     "retry",
 			Target:     jobID,
 			Allowed:    true,
@@ -883,14 +902,17 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	response := map[string]any{
 		"status":      "ok",
-		"job_id":      jobID,
 		"action":      action,
+		"target":      jobID,
 		"accepted":    true,
+		"reason":      "job_dead_letter_retried",
+		"job_id":      jobID,
 		"retried_job": retried,
 		"current_job": current,
-	})
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (a *runtimeApp) handleAIMessage(w http.ResponseWriter, r *http.Request) {
@@ -1160,6 +1182,15 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 		http.Error(w, "plugin config operator only supports plugin-echo", http.StatusNotFound)
 		return
 	}
+	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
+	if actor == "" {
+		actor = "admin-user"
+	}
+	if err := runtimecore.AuthorizeRBACAction(a.config.RBAC, actor, pluginConfigPermission, pluginID); err != nil {
+		runtimecore.RecordAuthorizationDeniedAudit(a.audits, actor, pluginConfigPermission, pluginID, err)
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("read plugin config: %v", err), http.StatusBadRequest)
@@ -1174,20 +1205,36 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if a.audits != nil {
+		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
+			Actor:      actor,
+			Permission: pluginConfigPermission,
+			Action:     "config.update",
+			Target:     pluginID,
+			Allowed:    true,
+			Reason:     "plugin_config_updated",
+			OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		})
+	}
 	stored, err := a.state.LoadPluginConfig(r.Context(), pluginID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	response := map[string]any{
 		"status":      "ok",
+		"action":      "config.update",
+		"target":      pluginID,
+		"accepted":    true,
+		"reason":      "plugin_config_updated",
 		"plugin_id":   pluginID,
 		"config":      map[string]any{"prefix": typedConfig.Prefix},
 		"updated_at":  stored.UpdatedAt.UTC().Format(time.RFC3339),
 		"persisted":   true,
 		"config_path": "/demo/plugins/plugin-echo/config",
-	})
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func parsePluginOperatorPath(path string) (pluginID string, action string, ok bool) {
@@ -1289,6 +1336,15 @@ func scheduleOperatorPermission(action string) string {
 	switch action {
 	case "cancel":
 		return scheduleCancelPermission
+	default:
+		return ""
+	}
+}
+
+func jobOperatorPermission(action string) string {
+	switch action {
+	case "retry":
+		return jobRetryPermission
 	default:
 		return ""
 	}
