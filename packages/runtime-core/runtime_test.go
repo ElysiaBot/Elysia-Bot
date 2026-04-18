@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -488,14 +489,14 @@ func TestRuntimeDispatchDoesNotInjectDeeperNestedManifestDefaultIntoSubprocessHo
 	}
 }
 
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedTypeMismatchIntoSubprocessHostRequest(t *testing.T) {
+func TestRuntimeDispatchRejectsBeyondSupportedDeeperNestedObjectNodeMismatchIntoSubprocessHostRequest(t *testing.T) {
 	t.Parallel()
 
 	buffer := &bytes.Buffer{}
 	logger := NewLogger(buffer)
 	tracer := NewTraceRecorder()
 	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-type-mismatch-not-enforced"))
+	host := NewSubprocessPluginHost(testPluginProcessFactory(t, "echo"))
 	host.SetObservability(logger, tracer, metrics)
 	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
 	handler := &recordingEventHandler{}
@@ -503,293 +504,7 @@ func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedTypeMismatchIntoSubproc
 	runtime.SetObservability(logger, tracer, metrics)
 
 	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 14, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested mismatch without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedArrayValueMismatchIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-array-value-mismatch-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Array Value Mismatch Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 14, 30, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested array-valued mismatch without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested array-valued runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested array-valued dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested array-valued runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedObjectValueMismatchIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-object-value-mismatch-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Object Value Mismatch Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 14, 45, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested object-valued mismatch without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested object-valued runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested object-valued dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested object-valued runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedObjectNodeMismatchIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-object-node-mismatch-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Object Node Mismatch Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime", Symbol: "Plugin"},
-		},
+		Manifest:       testBeyondSupportedDeeperNestedNamingManifest("plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime", "Instance Config Beyond Supported Deeper Nested Object Node Mismatch Runtime", "plugins/instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime", map[string]any{"type": "string"}, false),
 		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
 		Handlers:       pluginsdk.Handlers{Event: handler},
 	}
@@ -797,648 +512,267 @@ func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedObjectNodeMismatchIntoS
 		t.Fatalf("register plugin: %v", err)
 	}
 
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 15, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested object-node mismatch without rejection, got %v", err)
+	event := eventmodel.Event{EventID: "evt-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime", TraceID: "trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime", Source: "scheduler", Type: "schedule.triggered", Timestamp: time.Date(2026, 4, 14, 10, 15, 0, 0, time.UTC), IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime"}
+	err := runtime.DispatchEvent(context.Background(), event)
+	if err == nil || !strings.Contains(err.Error(), `dispatch completed with no successful plugin deliveries`) {
+		t.Fatalf("expected runtime to stop after deeper nested object-node mismatch rejection, got %v", err)
 	}
 	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
+		t.Fatal("expected subprocess host dispatch to stop before in-process handler execution")
 	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
+	if len(runtime.DispatchResults()) != 1 || runtime.DispatchResults()[0].Success {
+		t.Fatalf("expected failed dispatch result after deeper nested object-node mismatch rejection, got %+v", runtime.DispatchResults())
+	}
+	if !strings.Contains(runtime.DispatchResults()[0].Error, `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`) {
+		t.Fatalf("expected dispatch result to capture deeper nested object-node mismatch rejection, got %+v", runtime.DispatchResults())
+	}
+	if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+		t.Fatalf("expected runtime deeper nested object-node mismatch rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+	}
+	for _, expected := range []string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`, `"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming"`, `"parent_property_name":"settings.labels"`, `"nested_property_name":"naming"`, `"root_property_name":"settings"`, `"intermediate_property_name":"labels"`, `"declared_type":"object"`, `"actual_type":"boolean"`, "runtime dispatch failed"} {
+		if !strings.Contains(buffer.String(), expected) {
+			t.Fatalf("expected runtime observability to include %q, got %s", expected, buffer.String())
 		}
 	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested object-node runtime path to avoid instance config rejection logs, got %s", buffer.String())
+	rendered := tracer.RenderTrace(event.TraceID)
+	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.instance_config") {
+		t.Fatalf("expected runtime and object-node instance config spans, got %s", rendered)
 	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested object-node dispatch, got %s", buffer.String())
+	if strings.Contains(rendered, "plugin_host.dispatch") {
+		t.Fatalf("expected object-node mismatch rejection to stop before plugin_host.dispatch, got %s", rendered)
 	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested object-node runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+	if !strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-runtime"} 2`) {
+		t.Fatalf("expected plugin error metric to reflect host rejection plus runtime dispatch failure accounting, got %s", metrics.RenderPrometheus())
 	}
 }
 
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredMissingIntoSubprocessHostRequest(t *testing.T) {
+func TestRuntimeDispatchRejectsBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValuesIntoSubprocessHostRequest(t *testing.T) {
 	t.Parallel()
 
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
+	cases := []struct {
+		name           string
+		pluginID       string
+		instanceConfig map[string]any
+		wantErr        string
+		wantActualType string
+	}{
+		{name: "boolean", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`, wantActualType: "boolean"},
+		{name: "string", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "string"`, wantActualType: "string"},
+		{name: "number", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7.0}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "number"`, wantActualType: "number"},
+		{name: "null", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "null"`, wantActualType: "null"},
+		{name: "array", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "array"`, wantActualType: "array"},
 	}
 
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 16, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required missing without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := &bytes.Buffer{}
+			logger := NewLogger(buffer)
+			tracer := NewTraceRecorder()
+			metrics := NewMetricsRegistry()
+			host := NewSubprocessPluginHost(testPluginProcessFactory(t, "echo"))
+			host.SetObservability(logger, tracer, metrics)
+			t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
+			handler := &recordingEventHandler{}
+			runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
+			runtime.SetObservability(logger, tracer, metrics)
+
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, true),
+				InstanceConfig: tc.instanceConfig,
+				Handlers:       pluginsdk.Handlers{Event: handler},
+			}
+			if err := runtime.RegisterPlugin(plugin); err != nil {
+				t.Fatalf("register plugin: %v", err)
+			}
+
+			event := eventmodel.Event{EventID: "evt-" + tc.pluginID, TraceID: "trace-" + tc.pluginID, Source: "scheduler", Type: "schedule.triggered", Timestamp: time.Date(2026, 4, 14, 10, 41, 0, 0, time.UTC), IdempotencyKey: "schedule:" + tc.pluginID}
+			err := runtime.DispatchEvent(context.Background(), event)
+			if err == nil || !strings.Contains(err.Error(), `dispatch completed with no successful plugin deliveries`) {
+				t.Fatalf("expected runtime rejection wrapper error, got %v", err)
+			}
+			if handler.called {
+				t.Fatal("expected subprocess host rejection to stop before in-process handler execution")
+			}
+			if len(runtime.DispatchResults()) != 1 || runtime.DispatchResults()[0].Success {
+				t.Fatalf("expected failed dispatch result, got %+v", runtime.DispatchResults())
+			}
+			if !strings.Contains(runtime.DispatchResults()[0].Error, tc.wantErr) {
+				t.Fatalf("expected dispatch result to capture %q, got %+v", tc.wantErr, runtime.DispatchResults())
+			}
+			if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+				t.Fatalf("expected runtime rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+			}
+			for _, expected := range []string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`, `"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming"`, `"parent_property_name":"settings.labels"`, `"nested_property_name":"naming"`, `"root_property_name":"settings"`, `"intermediate_property_name":"labels"`, `"declared_type":"object"`, `"actual_type":"` + tc.wantActualType + `"`, "runtime dispatch failed"} {
+				if !strings.Contains(buffer.String(), expected) {
+					t.Fatalf("expected runtime observability to include %q, got %s", expected, buffer.String())
+				}
+			}
+			rendered := tracer.RenderTrace(event.TraceID)
+			if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.instance_config") {
+				t.Fatalf("expected runtime and object-node instance config spans, got %s", rendered)
+			}
+			if strings.Contains(rendered, "plugin_host.dispatch") {
+				t.Fatalf("expected object-node rejection to stop before plugin_host.dispatch, got %s", rendered)
+			}
+			if !strings.Contains(metrics.RenderPrometheus(), fmt.Sprintf(`bot_platform_plugin_errors_total{plugin_id=%q} 2`, tc.pluginID)) {
+				t.Fatalf("expected plugin error metric to reflect host rejection plus runtime dispatch failure accounting, got %s", metrics.RenderPrometheus())
+			}
+		})
 	}
 }
 
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedEnumOutOfSetIntoSubprocessHostRequest(t *testing.T) {
+func TestRuntimeDispatchRejectsBeyondSupportedDeeperNestedValidationOnExistingNamingBranchBeforePluginDelivery(t *testing.T) {
 	t.Parallel()
 
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-enum-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Enum Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
+	cases := []struct {
+		name            string
+		pluginID        string
+		prefixSchema    map[string]any
+		namingRequired  bool
+		instanceConfig  map[string]any
+		wantDispatchErr string
+		wantLogParts    []string
+	}{
+		{name: "type_mismatch", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-runtime", prefixSchema: map[string]any{"type": "string"}, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(true), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"boolean"`, "runtime dispatch failed"}},
+		{name: "array_value_mismatch", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-array-value-mismatch-runtime", prefixSchema: map[string]any{"type": "string"}, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"array"`, "runtime dispatch failed"}},
+		{name: "object_value_mismatch", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-object-value-mismatch-runtime", prefixSchema: map[string]any{"type": "string"}, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"object"`, "runtime dispatch failed"}},
+		{name: "required_missing", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-runtime", prefixSchema: map[string]any{"type": "string"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(), wantDispatchErr: `nested instance config required property "settings.labels.naming.prefix" must be provided`, wantLogParts: []string{`"failure_reason":"instance_config_missing_required_value"`, `"compatibility_rule":"instance_config_deeper_nested_required"`, `"property_name":"settings.labels.naming.prefix"`, "runtime dispatch failed"}},
+		{name: "enum_out_of_set", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-enum-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}}, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`, wantLogParts: []string{`"failure_reason":"instance_config_enum_value_out_of_set"`, `"compatibility_rule":"instance_config_deeper_nested_enum"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_value":"oops"`, `"enum_values":["hello","world"]`, "runtime dispatch failed"}},
+		{name: "required_enum_boundary", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(), wantDispatchErr: `nested instance config required property "settings.labels.naming.prefix" must be provided`, wantLogParts: []string{`"failure_reason":"instance_config_missing_required_value"`, `"property_name":"settings.labels.naming.prefix"`, "runtime dispatch failed"}},
+		{name: "required_enum_default_explicit_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`, wantLogParts: []string{`"failure_reason":"instance_config_enum_value_out_of_set"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_value":"oops"`, "runtime dispatch failed"}},
+		{name: "required_enum_default_explicit_array_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"array"`, "runtime dispatch failed"}},
+		{name: "required_enum_default_explicit_wrong_type_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(true), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"boolean"`, "runtime dispatch failed"}},
+		{name: "required_enum_default_explicit_object_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}), wantDispatchErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`, wantLogParts: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"object"`, "runtime dispatch failed"}},
 	}
 
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-enum-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-enum-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 17, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-enum-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested enum out-of-set without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested enum runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested enum dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-enum-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-enum-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested enum runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := &bytes.Buffer{}
+			logger := NewLogger(buffer)
+			tracer := NewTraceRecorder()
+			metrics := NewMetricsRegistry()
+			host := NewSubprocessPluginHost(testPluginProcessFactory(t, "echo"))
+			host.SetObservability(logger, tracer, metrics)
+			t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
+			handler := &recordingEventHandler{}
+			runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
+			runtime.SetObservability(logger, tracer, metrics)
+
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: tc.instanceConfig,
+				Handlers:       pluginsdk.Handlers{Event: handler},
+			}
+			if err := runtime.RegisterPlugin(plugin); err != nil {
+				t.Fatalf("register plugin: %v", err)
+			}
+
+			event := eventmodel.Event{EventID: "evt-" + tc.pluginID, TraceID: "trace-" + tc.pluginID, Source: "scheduler", Type: "schedule.triggered", Timestamp: time.Date(2026, 4, 14, 10, 30, 0, 0, time.UTC), IdempotencyKey: "schedule:" + tc.pluginID}
+			err := runtime.DispatchEvent(context.Background(), event)
+			if err == nil || !strings.Contains(err.Error(), "dispatch completed with no successful plugin deliveries") {
+				t.Fatalf("expected runtime rejection wrapper error, got %v", err)
+			}
+			if handler.called {
+				t.Fatal("expected subprocess host rejection to stop before in-process handler execution")
+			}
+			if len(runtime.DispatchResults()) != 1 || runtime.DispatchResults()[0].Success {
+				t.Fatalf("expected failed dispatch result, got %+v", runtime.DispatchResults())
+			}
+			if !strings.Contains(runtime.DispatchResults()[0].Error, tc.wantDispatchErr) {
+				t.Fatalf("expected dispatch result to capture %q, got %+v", tc.wantDispatchErr, runtime.DispatchResults())
+			}
+			if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+				t.Fatalf("expected runtime rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+			}
+			for _, expected := range append([]string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`}, tc.wantLogParts...) {
+				if !strings.Contains(buffer.String(), expected) {
+					t.Fatalf("expected runtime observability to include %q, got %s", expected, buffer.String())
+				}
+			}
+			rendered := tracer.RenderTrace(event.TraceID)
+			if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.instance_config") {
+				t.Fatalf("expected runtime and instance_config spans, got %s", rendered)
+			}
+			if strings.Contains(rendered, "plugin_host.dispatch") {
+				t.Fatalf("expected runtime rejection to stop before plugin_host.dispatch, got %s", rendered)
+			}
+			if !strings.Contains(metrics.RenderPrometheus(), fmt.Sprintf(`bot_platform_plugin_errors_total{plugin_id=%q} 2`, tc.pluginID)) {
+				t.Fatalf("expected plugin error metric to reflect host rejection plus runtime dispatch failure accounting, got %s", metrics.RenderPrometheus())
+			}
+		})
 	}
 }
 
-func TestRuntimeDispatchDoesNotInjectBeyondSupportedDeeperNestedManifestDefaultIntoSubprocessHostRequest(t *testing.T) {
+func TestRuntimeDispatchMergesBeyondSupportedDeeperNestedDefaultVariantsOnExistingNamingBranch(t *testing.T) {
 	t.Parallel()
 
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-not-injected"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-default-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Default Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-default-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
+	cases := []struct {
+		name           string
+		pluginID       string
+		prefixSchema   map[string]any
+		namingRequired bool
+	}{
+		{name: "required_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-default-runtime", prefixSchema: map[string]any{"type": "string", "default": "hello"}, namingRequired: true},
+		{name: "enum_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-enum-default-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}},
+		{name: "required_enum_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true},
 	}
 
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-default-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-default-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 18, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-default-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested default omission without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested default runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested default dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-default-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-default-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested default runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := &bytes.Buffer{}
+			logger := NewLogger(buffer)
+			tracer := NewTraceRecorder()
+			metrics := NewMetricsRegistry()
+			host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-merged"))
+			host.SetObservability(logger, tracer, metrics)
+			t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
+			handler := &recordingEventHandler{}
+			runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
+			runtime.SetObservability(logger, tracer, metrics)
+
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(),
+				Handlers:       pluginsdk.Handlers{Event: handler},
+			}
+			if err := runtime.RegisterPlugin(plugin); err != nil {
+				t.Fatalf("register plugin: %v", err)
+			}
+
+			event := eventmodel.Event{EventID: "evt-" + tc.pluginID, TraceID: "trace-" + tc.pluginID, Source: "scheduler", Type: "schedule.triggered", Timestamp: time.Date(2026, 4, 14, 10, 35, 0, 0, time.UTC), IdempotencyKey: "schedule:" + tc.pluginID}
+			if err := runtime.DispatchEvent(context.Background(), event); err != nil {
+				t.Fatalf("expected runtime dispatch to merge deeper nested default, got %v", err)
+			}
+			if handler.called {
+				t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
+			}
+			stdout := strings.Join(host.StdoutLines(), "\n")
+			for _, expected := range []string{"handshake-ready", "event-ok"} {
+				if !strings.Contains(stdout, expected) {
+					t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
+				}
+			}
+			if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
+				t.Fatalf("expected deeper nested default merge runtime path to avoid rejection logs, got %s", buffer.String())
+			}
+			if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
+				t.Fatalf("expected runtime+host logs for deeper nested default merge dispatch, got %s", buffer.String())
+			}
+			rendered := tracer.RenderTrace(event.TraceID)
+			if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
+				t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
+			}
+			if strings.Contains(metrics.RenderPrometheus(), fmt.Sprintf(`bot_platform_plugin_errors_total{plugin_id=%q}`, tc.pluginID)) {
+				t.Fatalf("expected no plugin error metric for merged default path, got %s", metrics.RenderPrometheus())
+			}
+		})
 	}
 }
 
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredDefaultBoundaryIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-default-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-default-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Default Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-default-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-default-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-default-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 18, 30, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-default-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+default boundary without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+default runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+default dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-default-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-default-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+default runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedEnumDefaultBoundaryIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-enum-default-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-default-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Enum Default Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-default-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-enum-default-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-enum-default-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 18, 45, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-enum-default-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested enum+default boundary without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested enum+default runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested enum+default dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-enum-default-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-enum-default-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested enum+default runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumBoundaryIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum boundary without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultBoundaryIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 15, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default boundary without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultChildOmissionBoundaryIntoSubprocessHostRequest(t *testing.T) {
+func TestRuntimeDispatchMaterializesBeyondSupportedDeeperNestedRequiredEnumDefaultChildOmissionBoundaryIntoSubprocessHostRequest(t *testing.T) {
 	t.Parallel()
 
 	buffer := &bytes.Buffer{}
@@ -1499,7 +833,7 @@ func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultChil
 		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-child-omission-runtime",
 	}
 	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default child omission boundary without rejection, got %v", err)
+		t.Fatalf("expected runtime dispatch to synthesize beyond-supported deeper nested child omission branch without rejection, got %v", err)
 	}
 	if handler.called {
 		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
@@ -1511,17 +845,103 @@ func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultChil
 		}
 	}
 	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission runtime path to avoid instance config rejection logs, got %s", buffer.String())
+		t.Fatalf("expected beyond-supported deeper nested child omission runtime path to avoid instance config rejection logs, got %s", buffer.String())
 	}
 	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default child omission dispatch, got %s", buffer.String())
+		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested child omission dispatch, got %s", buffer.String())
 	}
 	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-child-omission-runtime")
 	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
 		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
 	}
 	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-child-omission-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+		t.Fatalf("expected beyond-supported deeper nested child omission runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
+	}
+}
+
+func TestRuntimeDispatchMergesBeyondSupportedDeeperNestedDefaultIntoExistingNamingBranch(t *testing.T) {
+	t.Parallel()
+
+	buffer := &bytes.Buffer{}
+	logger := NewLogger(buffer)
+	tracer := NewTraceRecorder()
+	metrics := NewMetricsRegistry()
+	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-merged"))
+	host.SetObservability(logger, tracer, metrics)
+	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
+	handler := &recordingEventHandler{}
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
+	runtime.SetObservability(logger, tracer, metrics)
+
+	plugin := pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-instance-config-beyond-supported-deeper-nested-default-runtime",
+			Name:       "Instance Config Beyond Supported Deeper Nested Default Runtime",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			ConfigSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"settings": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"labels": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"naming": map[string]any{
+										"type": "object",
+										"properties": map[string]any{
+											"prefix": map[string]any{"type": "string", "default": "hello"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-default-runtime", Symbol: "Plugin"},
+		},
+		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
+		Handlers:       pluginsdk.Handlers{Event: handler},
+	}
+	if err := runtime.RegisterPlugin(plugin); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+
+	event := eventmodel.Event{
+		EventID:        "evt-instance-config-beyond-supported-deeper-nested-default-runtime",
+		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-default-runtime",
+		Source:         "scheduler",
+		Type:           "schedule.triggered",
+		Timestamp:      time.Date(2026, 4, 14, 10, 18, 0, 0, time.UTC),
+		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-default-runtime",
+	}
+	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
+		t.Fatalf("expected runtime dispatch to merge beyond-supported deeper nested default on existing naming branch, got %v", err)
+	}
+	if handler.called {
+		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
+	}
+	stdout := strings.Join(host.StdoutLines(), "\n")
+	for _, expected := range []string{"handshake-ready", "event-ok"} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
+		}
+	}
+	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
+		t.Fatalf("expected beyond-supported deeper nested default merge runtime path to avoid instance config rejection logs, got %s", buffer.String())
+	}
+	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
+		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested default merge dispatch, got %s", buffer.String())
+	}
+	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-default-runtime")
+	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
+		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
+	}
+	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-default-runtime"}`) {
+		t.Fatalf("expected beyond-supported deeper nested default merge runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
 	}
 }
 
@@ -1796,788 +1216,6 @@ func TestRuntimeDispatchTreatsNilAndEmptyInstanceConfigAsEquivalentBeyondSupport
 	}
 }
 
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 30, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Array Valued Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 40, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit array-valued bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit array-valued bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitWrongTypeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Wrong Type Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 45, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit wrong-type bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit wrong-type bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit wrong-type bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit wrong-type bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectValuedBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Object Valued Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 50, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit object-valued bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit object-valued bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Object Node Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 55, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit object-node bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-node bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit object-node bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-node bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitStringValuedObjectNodeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit String Valued Object Node Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 19, 57, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNumberValuedObjectNodeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Number Valued Object Node Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 20, 2, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNullValuedObjectNodeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Null Valued Object Node Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 20, 4, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
-
-func TestRuntimeDispatchPassesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedObjectNodeBadValueIntoSubprocessHostRequest(t *testing.T) {
-	t.Parallel()
-
-	buffer := &bytes.Buffer{}
-	logger := NewLogger(buffer)
-	tracer := NewTraceRecorder()
-	metrics := NewMetricsRegistry()
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-not-enforced"))
-	host.SetObservability(logger, tracer, metrics)
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	handler := &recordingEventHandler{}
-	runtime := NewInMemoryRuntime(NoopSupervisor{}, host)
-	runtime.SetObservability(logger, tracer, metrics)
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime",
-			Name:       "Instance Config Beyond Supported Deeper Nested Required Enum Default Explicit Array Valued Object Node Bad Value Runtime",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}},
-		Handlers:       pluginsdk.Handlers{Event: handler},
-	}
-	if err := runtime.RegisterPlugin(plugin); err != nil {
-		t.Fatalf("register plugin: %v", err)
-	}
-
-	event := eventmodel.Event{
-		EventID:        "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime",
-		TraceID:        "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime",
-		Source:         "scheduler",
-		Type:           "schedule.triggered",
-		Timestamp:      time.Date(2026, 4, 14, 10, 20, 0, 0, time.UTC),
-		IdempotencyKey: "schedule:instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime",
-	}
-	if err := runtime.DispatchEvent(context.Background(), event); err != nil {
-		t.Fatalf("expected runtime dispatch to preserve beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value without rejection, got %v", err)
-	}
-	if handler.called {
-		t.Fatal("expected subprocess host dispatch to avoid in-process handler execution")
-	}
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected subprocess stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	if strings.Contains(buffer.String(), "subprocess host instance config rejected") {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value runtime path to avoid instance config rejection logs, got %s", buffer.String())
-	}
-	if !strings.Contains(buffer.String(), "subprocess host dispatch completed") || !strings.Contains(buffer.String(), "runtime dispatch completed") {
-		t.Fatalf("expected runtime+host logs for beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value dispatch, got %s", buffer.String())
-	}
-	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime")
-	if !strings.Contains(rendered, "runtime.dispatch") || !strings.Contains(rendered, "plugin_host.dispatch") {
-		t.Fatalf("expected runtime and subprocess host dispatch spans, got %s", rendered)
-	}
-	if strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-runtime"}`) {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value runtime path to avoid plugin error metrics, got %s", metrics.RenderPrometheus())
-	}
-}
 
 func TestRuntimeDispatchRejectsNestedInstanceConfigValueTypeMismatchBeforePluginDelivery(t *testing.T) {
 	t.Parallel()

@@ -2232,7 +2232,7 @@ func TestBuiltSubprocessFixtureDoesNotReceiveInjectedDeeperNestedManifestDefault
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedTypeMismatch(t *testing.T) {
+func TestBuildSubprocessHostRequestRejectsBeyondSupportedDeeperNestedTypeMismatch(t *testing.T) {
 	t.Parallel()
 
 	plugin := pluginsdk.Plugin{
@@ -2268,293 +2268,32 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedTypeMisma
 		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
 	}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to stop descending beyond current helper depth, got %v", err)
+	_, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+	if err == nil || !strings.Contains(err.Error(), `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`) {
+		t.Fatalf("expected request build to reject beyond-supported deeper nested type mismatch, got %v", err)
 	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested instance_config payload")
+	var configErr *subprocessInstanceConfigFailure
+	if !errors.As(err, &configErr) {
+		t.Fatalf("expected beyond-supported deeper nested request build error classification, got %T %v", err, err)
 	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":true}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested mismatch to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
+	if configErr.reason != subprocessFailureReasonInstanceConfigValueTypeMismatch || configErr.compatibilityRule != "instance_config_deeper_nested_value_type" {
+		t.Fatalf("expected deeper nested beyond-supported mismatch classification, got reason=%q rule=%q", configErr.reason, configErr.compatibilityRule)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested instance config payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(bool)
-	if !ok || !prefix {
-		t.Fatalf("expected beyond-supported deeper nested type-mismatch value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedTypeMismatch(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-type-mismatch-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-type-mismatch-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedTypeMismatchFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-type-mismatch-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-type-mismatch", EventID: "evt-instance-config-beyond-supported-deeper-nested-type-mismatch"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested mismatch without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
+	for key, expected := range map[string]any{
+		"property_name":        "settings.labels.naming.prefix",
+		"parent_property_name": "settings.labels.naming",
+		"nested_property_name": "prefix",
+		"root_property_name":   "settings",
+		"declared_type":        "string",
+		"actual_type":          "boolean",
+	} {
+		if actual := configErr.metadata[key]; actual != expected {
+			t.Fatalf("expected beyond-supported deeper nested mismatch metadata %q=%v, got %+v", key, expected, configErr.metadata)
 		}
 	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedArrayValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-array-value-mismatch-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedArrayValueMismatchRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-array-value-mismatch-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested array-valued mismatch, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested array-valued payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":["oops"]}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested array-valued mismatch to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested array-valued payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].([]any)
-	if !ok || len(prefix) != 1 {
-		t.Fatalf("expected beyond-supported deeper nested array-valued mismatch to pass through unchanged, got %+v", decoded)
-	}
-	first, ok := prefix[0].(string)
-	if !ok || first != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested array member to stay unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedArrayValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-array-value-mismatch-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-array-value-mismatch-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedArrayValueMismatchFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-array-value-mismatch-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-array-value-mismatch", EventID: "evt-instance-config-beyond-supported-deeper-nested-array-value-mismatch"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested array-valued mismatch without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedObjectValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-value-mismatch-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedObjectValueMismatchRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-value-mismatch-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested object-valued mismatch, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested object-valued payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":{"bad":true}}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested object-valued mismatch to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested object-valued payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected beyond-supported deeper nested object-valued mismatch to pass through unchanged, got %+v", decoded)
-	}
-	bad, ok := prefix["bad"].(bool)
-	if !ok || !bad {
-		t.Fatalf("expected beyond-supported deeper nested object-valued member to stay unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedObjectNodeMismatch(t *testing.T) {
+func TestBuildSubprocessHostRequestRejectsBeyondSupportedDeeperNestedObjectNodeMismatch(t *testing.T) {
 	t.Parallel()
 
 	plugin := pluginsdk.Plugin{
@@ -2590,395 +2329,33 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedObjectNod
 		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
 	}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested object-node mismatch, got %v", err)
+	_, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+	if err == nil || !strings.Contains(err.Error(), `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`) {
+		t.Fatalf("expected request build to reject beyond-supported deeper nested object-node mismatch, got %v", err)
 	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested object-node mismatch payload")
+	var configErr *subprocessInstanceConfigFailure
+	if !errors.As(err, &configErr) {
+		t.Fatalf("expected beyond-supported deeper nested object-node request build error classification, got %T %v", err, err)
 	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":true}}}` {
-		t.Fatalf("expected beyond-supported deeper nested object-node mismatch to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
+	if configErr.reason != subprocessFailureReasonInstanceConfigValueTypeMismatch || configErr.compatibilityRule != "instance_config_deeper_nested_value_type" {
+		t.Fatalf("expected deeper nested object-node mismatch classification, got reason=%q rule=%q", configErr.reason, configErr.compatibilityRule)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested object-node payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(bool)
-	if !ok || !naming {
-		t.Fatalf("expected beyond-supported deeper nested object-node mismatch to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedObjectNodeMismatch(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-object-node-mismatch-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedObjectNodeMismatchFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-node-mismatch-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch", EventID: "evt-instance-config-beyond-supported-deeper-nested-object-node-mismatch"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested object-node mismatch without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
+	for key, expected := range map[string]any{
+		"property_name":              "settings.labels.naming",
+		"parent_property_name":       "settings.labels",
+		"nested_property_name":       "naming",
+		"root_property_name":         "settings",
+		"intermediate_property_name": "labels",
+		"declared_type":              "object",
+		"actual_type":                "boolean",
+	} {
+		if actual := configErr.metadata[key]; actual != expected {
+			t.Fatalf("expected beyond-supported deeper nested object-node mismatch metadata %q=%v, got %+v", key, expected, configErr.metadata)
 		}
 	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
 }
 
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedObjectValueMismatch(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-object-value-mismatch-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-value-mismatch-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedObjectValueMismatchFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-value-mismatch-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-object-value-mismatch", EventID: "evt-instance-config-beyond-supported-deeper-nested-object-value-mismatch"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested object-valued mismatch without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredMissing(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required missing boundary, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required missing payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested required boundary to keep naming object empty, got %+v", decoded)
-	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested required member to stay absent in request payload, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredMissing(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required", EventID: "evt-instance-config-beyond-supported-deeper-nested-required"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested required missing without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedEnumOutOfSet(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedEnumRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested enum out-of-set boundary, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested enum payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":"oops"}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested enum payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested enum payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(string)
-	if !ok || prefix != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested enum value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedEnumOutOfSet(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-enum-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedEnumFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-enum", EventID: "evt-instance-config-beyond-supported-deeper-nested-enum"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to receive beyond-supported deeper nested enum out-of-set without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestDoesNotInjectBeyondSupportedDeeperNestedManifestDefaultIntoInstanceConfig(t *testing.T) {
+func TestBuildSubprocessHostRequestMergesBeyondSupportedDeeperNestedDefaultIntoExistingNamingBranch(t *testing.T) {
 	t.Parallel()
 
 	plugin := pluginsdk.Plugin{
@@ -3016,17 +2393,17 @@ func TestBuildSubprocessHostRequestDoesNotInjectBeyondSupportedDeeperNestedManif
 
 	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
 	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested default-only boundary without injection, got %v", err)
+		t.Fatalf("expected request build to merge beyond-supported deeper nested default into existing naming branch, got %v", err)
 	}
 	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested default-only payload")
+		t.Fatal("expected host request to keep beyond-supported deeper nested payload")
 	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested default-only payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
+	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":"hello"}}}}` {
+		t.Fatalf("expected beyond-supported deeper nested default merge in raw payload, got %s", string(request.InstanceConfig))
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested default-only payload to remain decodable, got %v", err)
+		t.Fatalf("expected merged beyond-supported deeper nested payload to remain decodable, got %v", err)
 	}
 	settings, ok := decoded["settings"].(map[string]any)
 	if !ok {
@@ -3040,18 +2417,19 @@ func TestBuildSubprocessHostRequestDoesNotInjectBeyondSupportedDeeperNestedManif
 	if !ok {
 		t.Fatalf("expected naming object to remain present, got %+v", decoded)
 	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested default-only boundary to keep naming object empty, got %+v", decoded)
+	prefix, ok := naming["prefix"].(string)
+	if !ok || prefix != "hello" {
+		t.Fatalf("expected beyond-supported deeper nested merged default leaf, got %+v", decoded)
 	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested default member to stay absent in request payload, got %+v", decoded)
+	if originalNaming := plugin.InstanceConfig["settings"].(map[string]any)["labels"].(map[string]any)["naming"].(map[string]any); len(originalNaming) != 0 {
+		t.Fatalf("expected original plugin instance config branch to remain unmodified, got %+v", plugin.InstanceConfig)
 	}
 }
 
-func TestBuiltSubprocessFixtureDoesNotReceiveInjectedBeyondSupportedDeeperNestedManifestDefault(t *testing.T) {
+func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedMergedDefault(t *testing.T) {
 	t.Parallel()
 
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-not-injected"))
+	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-merged"))
 	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
 	plugin := pluginsdk.Plugin{
 		Manifest: pluginsdk.PluginManifest{
@@ -3085,10 +2463,10 @@ func TestBuiltSubprocessFixtureDoesNotReceiveInjectedBeyondSupportedDeeperNested
 		},
 		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
 	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-default", EventID: "evt-instance-config-beyond-supported-deeper-nested-default"}
+	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-default-merged", EventID: "evt-instance-config-beyond-supported-deeper-nested-default-merged"}
 
 	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested default-only boundary without injection, got %v", err)
+		t.Fatalf("expected built fixture request to receive merged beyond-supported deeper nested default, got %v", err)
 	}
 
 	stdout := strings.Join(host.StdoutLines(), "\n")
@@ -3103,140 +2481,22 @@ func TestBuiltSubprocessFixtureDoesNotReceiveInjectedBeyondSupportedDeeperNested
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredDefaultBoundary(t *testing.T) {
+func TestSubprocessPluginHostRejectsBeyondSupportedDeeperNestedObjectNodeMismatchBeforeProcessLaunch(t *testing.T) {
 	t.Parallel()
 
+	launches := 0
+	logs := &bytes.Buffer{}
+	tracer := NewTraceRecorder()
+	metrics := NewMetricsRegistry()
+	host := NewSubprocessPluginHost(func(ctx context.Context) *exec.Cmd {
+		launches++
+		return testPluginProcessFactory(t, "echo")(ctx)
+	})
+	host.SetObservability(NewLogger(logs), tracer, metrics)
 	plugin := pluginsdk.Plugin{
 		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-default-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredDefaultRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-default-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+default boundary without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+default payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+default payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+default payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested required+default boundary to keep naming object empty, got %+v", decoded)
-	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested required+default member to stay absent in request payload, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredDefaultBoundary(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-default-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-default-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredDefaultFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-default-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-default", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-default"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+default boundary without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedEnumDefaultBoundary(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-default-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedEnumDefaultRequest",
+			ID:         "plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-fixture",
+			Name:       "InstanceConfigBeyondSupportedDeeperNestedObjectNodeMismatchFixture",
 			Version:    "0.1.0",
 			APIVersion: "v0",
 			Mode:       pluginsdk.ModeSubprocess,
@@ -3252,7 +2512,7 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedEnumDefau
 									"naming": map[string]any{
 										"type": "object",
 										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+											"prefix": map[string]any{"type": "string"},
 										},
 									},
 								},
@@ -3261,299 +2521,427 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedEnumDefau
 					},
 				},
 			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-default-request", Symbol: "Plugin"},
+			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-object-node-mismatch-fixture", Symbol: "Plugin"},
 		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
+		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
 	}
+	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch", EventID: "evt-instance-config-beyond-supported-deeper-nested-object-node-mismatch", PluginID: plugin.Manifest.ID, CorrelationID: "corr-instance-config-beyond-supported-deeper-nested-object-node-mismatch"}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested enum+default boundary without rejection, got %v", err)
+	err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx)
+	if err == nil || !strings.Contains(err.Error(), `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`) {
+		t.Fatalf("expected deeper nested object-node mismatch rejection, got %v", err)
 	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested enum+default payload")
+	if launches != 0 {
+		t.Fatalf("expected deeper nested object-node mismatch rejection before subprocess launch, launches=%d", launches)
 	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested enum+default payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
+	if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+		t.Fatalf("expected deeper nested object-node mismatch rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested enum+default payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested enum+default boundary to keep naming object empty, got %+v", decoded)
-	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested enum+default member to stay absent in request payload, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedEnumDefaultBoundary(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-enum-default-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-enum-default-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedEnumDefaultFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type": "object",
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-enum-default-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-enum-default", EventID: "evt-instance-config-beyond-supported-deeper-nested-enum-default"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested enum+default boundary without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
+	for _, expected := range []string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`, `"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming"`, `"parent_property_name":"settings.labels"`, `"nested_property_name":"naming"`, `"root_property_name":"settings"`, `"intermediate_property_name":"labels"`, `"declared_type":"object"`, `"actual_type":"boolean"`} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Fatalf("expected deeper nested object-node mismatch rejection log %q, got %s", expected, logs.String())
 		}
 	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+	rendered := tracer.RenderTrace("trace-instance-config-beyond-supported-deeper-nested-object-node-mismatch")
+	if !strings.Contains(rendered, "plugin_host.instance_config") {
+		t.Fatalf("expected deeper nested object-node mismatch trace span, got %s", rendered)
+	}
+	if strings.Contains(rendered, "plugin_host.dispatch") {
+		t.Fatalf("expected deeper nested object-node mismatch rejection to stop before dispatch span, got %s", rendered)
+	}
+	if !strings.Contains(metrics.RenderPrometheus(), `bot_platform_plugin_errors_total{plugin_id="plugin-instance-config-beyond-supported-deeper-nested-object-node-mismatch-fixture"} 1`) {
+		t.Fatalf("expected plugin error metric, got %s", metrics.RenderPrometheus())
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumBoundary(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
+func testBeyondSupportedDeeperNestedNamingManifest(id string, name string, module string, prefixSchema map[string]any, namingRequired bool) pluginsdk.PluginManifest {
+	namingSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"prefix": prefixSchema,
+		},
+	}
+	if namingRequired {
+		namingSchema["required"] = []any{"prefix"}
+	}
+	return pluginsdk.PluginManifest{
+		ID:         id,
+		Name:       name,
+		Version:    "0.1.0",
+		APIVersion: "v0",
+		Mode:       pluginsdk.ModeSubprocess,
+		ConfigSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"settings": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"labels": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"naming": namingSchema,
 							},
 						},
 					},
 				},
 			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-request", Symbol: "Plugin"},
 		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum boundary without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum boundary to keep naming object empty, got %+v", decoded)
-	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested required+enum member to stay absent in request payload, got %+v", decoded)
+		Entry: pluginsdk.PluginEntry{Module: module, Symbol: "Plugin"},
 	}
 }
 
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumBoundary(t *testing.T) {
+func testBeyondSupportedDeeperNestedNamingInstanceConfig(prefixValue any) map[string]any {
+	return map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": prefixValue}}}}
+}
+
+func testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig() map[string]any {
+	return map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}}
+}
+
+func TestBuildSubprocessHostRequestRejectsBeyondSupportedDeeperNestedValidationOnExistingNamingBranch(t *testing.T) {
 	t.Parallel()
 
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
+	type testCase struct {
+		name           string
+		pluginID       string
+		prefixSchema   map[string]any
+		namingRequired bool
+		instanceConfig map[string]any
+		wantErr        string
+		wantReason     string
+		wantRule       string
+		wantMetadata   map[string]any
+		wantEnumValues []any
+	}
+
+	cases := []testCase{
+		{
+			name:           "required_missing",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-request",
+			prefixSchema:   map[string]any{"type": "string"},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(),
+			wantErr:        `nested instance config required property "settings.labels.naming.prefix" must be provided`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigMissingRequired),
+			wantRule:       "instance_config_deeper_nested_required",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
 			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-fixture", Symbol: "Plugin"},
 		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
+		{
+			name:           "required_enum_missing",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-enum-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(),
+			wantErr:        `nested instance config required property "settings.labels.naming.prefix" must be provided`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigMissingRequired),
+			wantRule:       "instance_config_deeper_nested_required",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+			},
+		},
+		{
+			name:           "enum_out_of_set",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-enum-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}},
+			instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"),
+			wantErr:        `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigEnumValueOutOfSet),
+			wantRule:       "instance_config_deeper_nested_enum",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+				"actual_value":         "oops",
+			},
+			wantEnumValues: []any{"hello", "world"},
+		},
+		{
+			name:           "required_enum_default_explicit_bad_value",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"),
+			wantErr:        `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigEnumValueOutOfSet),
+			wantRule:       "instance_config_deeper_nested_enum",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+				"actual_value":         "oops",
+			},
+			wantEnumValues: []any{"hello", "world"},
+		},
+		{
+			name:           "required_enum_default_explicit_array_bad_value",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}),
+			wantErr:        `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigValueTypeMismatch),
+			wantRule:       "instance_config_deeper_nested_value_type",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+				"actual_type":          "array",
+			},
+		},
+		{
+			name:           "required_enum_default_explicit_wrong_type_bad_value",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(true),
+			wantErr:        `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigValueTypeMismatch),
+			wantRule:       "instance_config_deeper_nested_value_type",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+				"actual_type":          "boolean",
+			},
+		},
+		{
+			name:           "required_enum_default_explicit_object_bad_value",
+			pluginID:       "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-request",
+			prefixSchema:   map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired: true,
+			instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}),
+			wantErr:        `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`,
+			wantReason:     string(subprocessFailureReasonInstanceConfigValueTypeMismatch),
+			wantRule:       "instance_config_deeper_nested_value_type",
+			wantMetadata: map[string]any{
+				"property_name":        "settings.labels.naming.prefix",
+				"parent_property_name": "settings.labels.naming",
+				"nested_property_name": "prefix",
+				"root_property_name":   "settings",
+				"declared_type":        "string",
+				"actual_type":          "object",
+			},
+		},
 	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum"}
 
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum boundary without rejection, got %v", err)
-	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: tc.instanceConfig,
+			}
 
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+			_, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected request build rejection containing %q, got %v", tc.wantErr, err)
+			}
+			var configErr *subprocessInstanceConfigFailure
+			if !errors.As(err, &configErr) {
+				t.Fatalf("expected request build error classification, got %T %v", err, err)
+			}
+			if string(configErr.reason) != tc.wantReason {
+				t.Fatalf("expected request build failure reason %q, got %q", tc.wantReason, configErr.reason)
+			}
+			if configErr.compatibilityRule != tc.wantRule {
+				t.Fatalf("expected request build compatibility rule %q, got %q", tc.wantRule, configErr.compatibilityRule)
+			}
+			for key, expected := range tc.wantMetadata {
+				if actual := configErr.metadata[key]; actual != expected {
+					t.Fatalf("expected request build metadata %q=%v, got %+v", key, expected, configErr.metadata)
+				}
+			}
+			if tc.wantEnumValues != nil {
+				enumValues, ok := configErr.metadata["enum_values"].([]any)
+				if !ok || len(enumValues) != len(tc.wantEnumValues) {
+					t.Fatalf("expected enum_values metadata, got %+v", configErr.metadata)
+				}
+				for index, expected := range tc.wantEnumValues {
+					if enumValues[index] != expected {
+						t.Fatalf("expected enum_values[%d]=%v, got %+v", index, expected, enumValues)
+					}
+				}
+			}
+		})
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultBoundary(t *testing.T) {
+func TestSubprocessPluginHostRejectsBeyondSupportedDeeperNestedValidationOnExistingNamingBranchBeforeProcessLaunch(t *testing.T) {
 	t.Parallel()
 
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
+	type testCase struct {
+		name            string
+		pluginID        string
+		prefixSchema    map[string]any
+		namingRequired  bool
+		instanceConfig  map[string]any
+		wantErr         string
+		wantLogSnippets []string
 	}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default boundary without rejection, got %v", err)
+	cases := []testCase{
+		{
+			name:            "required_missing",
+			pluginID:        "plugin-instance-config-beyond-supported-deeper-nested-required-fixture",
+			prefixSchema:    map[string]any{"type": "string"},
+			namingRequired:  true,
+			instanceConfig:  testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(),
+			wantErr:         `nested instance config required property "settings.labels.naming.prefix" must be provided`,
+			wantLogSnippets: []string{`"failure_reason":"instance_config_missing_required_value"`, `"compatibility_rule":"instance_config_deeper_nested_required"`, `"property_name":"settings.labels.naming.prefix"`, `"declared_type":"string"`},
+		},
+		{
+			name:            "enum_out_of_set",
+			pluginID:        "plugin-instance-config-beyond-supported-deeper-nested-enum-fixture",
+			prefixSchema:    map[string]any{"type": "string", "enum": []any{"hello", "world"}},
+			instanceConfig:  testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"),
+			wantErr:         `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`,
+			wantLogSnippets: []string{`"failure_reason":"instance_config_enum_value_out_of_set"`, `"compatibility_rule":"instance_config_deeper_nested_enum"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_value":"oops"`, `"enum_values":["hello","world"]`},
+		},
+		{
+			name:            "required_enum_default_explicit_wrong_type_bad_value",
+			pluginID:        "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-fixture",
+			prefixSchema:    map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired:  true,
+			instanceConfig:  testBeyondSupportedDeeperNestedNamingInstanceConfig(true),
+			wantErr:         `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`,
+			wantLogSnippets: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"boolean"`},
+		},
+		{
+			name:            "required_enum_default_explicit_array_bad_value",
+			pluginID:        "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-fixture",
+			prefixSchema:    map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired:  true,
+			instanceConfig:  testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}),
+			wantErr:         `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`,
+			wantLogSnippets: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"array"`},
+		},
+		{
+			name:            "required_enum_default_explicit_object_bad_value",
+			pluginID:        "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-fixture",
+			prefixSchema:    map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
+			namingRequired:  true,
+			instanceConfig:  testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}),
+			wantErr:         `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`,
+			wantLogSnippets: []string{`"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming.prefix"`, `"actual_type":"object"`},
+		},
 	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	if len(naming) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default boundary to keep naming object empty, got %+v", decoded)
-	}
-	if _, exists := naming["prefix"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default member to stay absent in request payload, got %+v", decoded)
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			launches := 0
+			logs := &bytes.Buffer{}
+			tracer := NewTraceRecorder()
+			metrics := NewMetricsRegistry()
+			host := NewSubprocessPluginHost(func(ctx context.Context) *exec.Cmd {
+				launches++
+				return testPluginProcessFactory(t, "echo")(ctx)
+			})
+			host.SetObservability(NewLogger(logs), tracer, metrics)
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: tc.instanceConfig,
+			}
+			ctx := eventmodel.ExecutionContext{TraceID: "trace-" + tc.pluginID, EventID: "evt-" + tc.pluginID, PluginID: tc.pluginID, CorrelationID: "corr-" + tc.pluginID}
+
+			err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected host rejection containing %q, got %v", tc.wantErr, err)
+			}
+			if launches != 0 {
+				t.Fatalf("expected host rejection before subprocess launch, launches=%d", launches)
+			}
+			if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+				t.Fatalf("expected host rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+			}
+			for _, expected := range append([]string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`}, tc.wantLogSnippets...) {
+				if !strings.Contains(logs.String(), expected) {
+					t.Fatalf("expected host rejection log %q, got %s", expected, logs.String())
+				}
+			}
+			rendered := tracer.RenderTrace("trace-" + tc.pluginID)
+			if !strings.Contains(rendered, "plugin_host.instance_config") {
+				t.Fatalf("expected instance config trace span, got %s", rendered)
+			}
+			if strings.Contains(rendered, "plugin_host.dispatch") {
+				t.Fatalf("expected rejection to stop before dispatch span, got %s", rendered)
+			}
+			if !strings.Contains(metrics.RenderPrometheus(), fmt.Sprintf(`bot_platform_plugin_errors_total{plugin_id=%q} 1`, tc.pluginID)) {
+				t.Fatalf("expected plugin error metric, got %s", metrics.RenderPrometheus())
+			}
+		})
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultChildOmissionBoundary(t *testing.T) {
+func TestBuildSubprocessHostRequestMergesBeyondSupportedDeeperNestedDefaultVariantsOnExistingNamingBranch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		pluginID       string
+		prefixSchema   map[string]any
+		namingRequired bool
+	}{
+		{name: "default_only", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-default-request-variant", prefixSchema: map[string]any{"type": "string", "default": "hello"}},
+		{name: "required_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-default-request", prefixSchema: map[string]any{"type": "string", "default": "hello"}, namingRequired: true},
+		{name: "enum_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-enum-default-request", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}},
+		{name: "required_enum_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-request", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			instanceConfig := testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig()
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: instanceConfig,
+			}
+
+			request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+			if err != nil {
+				t.Fatalf("expected request build to merge deeper nested default, got %v", err)
+			}
+			if request.InstanceConfig == nil {
+				t.Fatal("expected host request to include merged deeper nested payload")
+			}
+			if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":"hello"}}}}` {
+				t.Fatalf("expected merged deeper nested default payload, got %s", string(request.InstanceConfig))
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
+				t.Fatalf("expected merged payload to remain decodable, got %v", err)
+			}
+			prefix := decoded["settings"].(map[string]any)["labels"].(map[string]any)["naming"].(map[string]any)["prefix"]
+			if prefix != "hello" {
+				t.Fatalf("expected merged default leaf, got %+v", decoded)
+			}
+			originalNaming := instanceConfig["settings"].(map[string]any)["labels"].(map[string]any)["naming"].(map[string]any)
+			if len(originalNaming) != 0 {
+				t.Fatalf("expected original instance config branch to remain unmodified, got %+v", instanceConfig)
+			}
+		})
+	}
+}
+
+func TestBuildSubprocessHostRequestMaterializesBeyondSupportedDeeperNestedRequiredEnumDefaultChildOmissionBoundary(t *testing.T) {
 	t.Parallel()
 
 	plugin := pluginsdk.Plugin{
@@ -3592,17 +2980,17 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredE
 
 	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
 	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default child omission boundary without rejection, got %v", err)
+		t.Fatalf("expected request build to synthesize beyond-supported deeper nested child omission branch without rejection, got %v", err)
 	}
 	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default child omission payload")
+		t.Fatal("expected host request to include synthesized beyond-supported deeper nested child omission payload")
 	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
+	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":"hello"}}}}` {
+		t.Fatalf("expected beyond-supported deeper nested child omission payload to synthesize naming default in raw payload, got %s", string(request.InstanceConfig))
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission payload to remain decodable, got %v", err)
+		t.Fatalf("expected beyond-supported deeper nested child omission payload to remain decodable, got %v", err)
 	}
 	settings, ok := decoded["settings"].(map[string]any)
 	if !ok {
@@ -3612,11 +3000,13 @@ func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredE
 	if !ok {
 		t.Fatalf("expected labels object to remain present, got %+v", decoded)
 	}
-	if len(labels) != 0 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission boundary to keep labels object empty, got %+v", decoded)
+	naming, ok := labels["naming"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected synthesized naming object to be present, got %+v", decoded)
 	}
-	if _, exists := labels["naming"]; exists {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default child omission to keep naming key absent in request payload, got %+v", decoded)
+	prefix, ok := naming["prefix"].(string)
+	if !ok || prefix != "hello" {
+		t.Fatalf("expected synthesized naming prefix default, got %+v", decoded)
 	}
 }
 
@@ -4251,59 +3641,81 @@ func TestBuiltSubprocessFixtureTreatsNilAndEmptyInstanceConfigAsEquivalentBeyond
 	}
 }
 
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultBoundary(t *testing.T) {
+func TestBuiltSubprocessFixtureRejectsBeyondSupportedDeeperNestedValidationOnExistingNamingBranch(t *testing.T) {
 	t.Parallel()
 
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default boundary without rejection, got %v", err)
+	cases := []struct {
+		name           string
+		pluginID       string
+		prefixSchema   map[string]any
+		namingRequired bool
+		instanceConfig map[string]any
+		wantErr        string
+	}{
+		{name: "required_enum_default_explicit_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-fixture", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"), wantErr: `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`},
+		{name: "required_enum_default_explicit_array_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-fixture", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`},
+		{name: "required_enum_default_explicit_wrong_type_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-fixture", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(true), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`},
+		{name: "required_enum_default_explicit_object_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-fixture", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true, instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`},
 	}
 
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			host := NewSubprocessPluginHost(testPluginProcessFactory(t, "echo"))
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: tc.instanceConfig,
+			}
+			ctx := eventmodel.ExecutionContext{TraceID: "trace-" + tc.pluginID, EventID: "evt-" + tc.pluginID}
+
+			if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected built fixture request rejection containing %q, got %v", tc.wantErr, err)
+			}
+			if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+				t.Fatalf("expected rejection before subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+			}
+		})
 	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+}
+
+func TestBuiltSubprocessFixtureMergesBeyondSupportedDeeperNestedDefaultVariantsOnExistingNamingBranch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		pluginID       string
+		prefixSchema   map[string]any
+		namingRequired bool
+	}{
+		{name: "required_enum_default", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-fixture", prefixSchema: map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, namingRequired: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-default-merged"))
+			t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, tc.prefixSchema, tc.namingRequired),
+				InstanceConfig: testBeyondSupportedDeeperNestedEmptyNamingInstanceConfig(),
+			}
+			ctx := eventmodel.ExecutionContext{TraceID: "trace-" + tc.pluginID, EventID: "evt-" + tc.pluginID}
+
+			if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
+				t.Fatalf("expected built fixture request to receive merged deeper nested default, got %v", err)
+			}
+
+			stdout := strings.Join(host.StdoutLines(), "\n")
+			for _, expected := range []string{"handshake-ready", "event-ok"} {
+				if !strings.Contains(stdout, expected) {
+					t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
+				}
+			}
+			stderr := strings.Join(host.StderrLines(), "\n")
+			if !strings.Contains(stderr, "stderr-online") {
+				t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+			}
+		})
 	}
 }
 
@@ -4541,1120 +3953,148 @@ func TestBuiltSubprocessFixtureTreatsNilAndEmptyInstanceConfigAsEquivalentBeyond
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitBadValue(t *testing.T) {
+func TestBuildSubprocessHostRequestRejectsBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitLeafVariants(t *testing.T) {
 	t.Parallel()
 
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
+	cases := []struct {
+		name           string
+		pluginID       string
+		instanceConfig map[string]any
+		wantErr        string
+	}{
+		{name: "explicit_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-request", instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig("oops"), wantErr: `nested instance config property "settings.labels.naming.prefix" value "oops" must be declared in enum ["hello","world"] for declared type "string"`},
+		{name: "explicit_array_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-request", instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig([]any{"oops"}), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "array"`},
+		{name: "explicit_wrong_type_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-request", instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(true), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "boolean"`},
+		{name: "explicit_object_bad_value", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-request", instanceConfig: testBeyondSupportedDeeperNestedNamingInstanceConfig(map[string]any{"bad": true}), wantErr: `nested instance config property "settings.labels.naming.prefix" value type must match declared type "string", got "object"`},
 	}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":"oops"}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(string)
-	if !ok || prefix != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit bad value to pass through unchanged, got %+v", decoded)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, true),
+				InstanceConfig: tc.instanceConfig,
+			}
+			_, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected request build rejection containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitBadValue(t *testing.T) {
+func TestBuildSubprocessHostRequestRejectsBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValues(t *testing.T) {
 	t.Parallel()
 
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": "oops"}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit bad value without rejection, got %v", err)
+	cases := []struct {
+		name          string
+		pluginID      string
+		instanceConfig map[string]any
+		wantErr       string
+		wantActualType string
+	}{
+		{name: "boolean", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-request", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`, wantActualType: "boolean"},
+		{name: "string", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-request", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "string"`, wantActualType: "string"},
+		{name: "number", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-request", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7.0}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "number"`, wantActualType: "number"},
+		{name: "null", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-request", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "null"`, wantActualType: "null"},
+		{name: "array", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-request", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "array"`, wantActualType: "array"},
 	}
 
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, true),
+				InstanceConfig: tc.instanceConfig,
+			}
+			_, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected request build rejection containing %q, got %v", tc.wantErr, err)
+			}
+			var configErr *subprocessInstanceConfigFailure
+			if !errors.As(err, &configErr) {
+				t.Fatalf("expected request build error classification, got %T %v", err, err)
+			}
+			if configErr.reason != subprocessFailureReasonInstanceConfigValueTypeMismatch || configErr.compatibilityRule != "instance_config_deeper_nested_value_type" {
+				t.Fatalf("expected object-node mismatch classification, got reason=%q rule=%q", configErr.reason, configErr.compatibilityRule)
+			}
+			for key, expected := range map[string]any{
+				"property_name":              "settings.labels.naming",
+				"parent_property_name":       "settings.labels",
+				"nested_property_name":       "naming",
+				"root_property_name":         "settings",
+				"intermediate_property_name": "labels",
+				"declared_type":              "object",
+				"actual_type":                tc.wantActualType,
+			} {
+				if actual := configErr.metadata[key]; actual != expected {
+					t.Fatalf("expected request build metadata %q=%v, got %+v", key, expected, configErr.metadata)
+				}
+			}
+		})
 	}
 }
 
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedBadValue(t *testing.T) {
+func TestSubprocessPluginHostRejectsBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValuesBeforeProcessLaunch(t *testing.T) {
 	t.Parallel()
 
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
+	cases := []struct {
+		name           string
+		pluginID       string
+		instanceConfig map[string]any
+		wantErr        string
+		wantActualType string
+	}{
+		{name: "boolean", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-fixture", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "boolean"`, wantActualType: "boolean"},
+		{name: "string", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-fixture", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "string"`, wantActualType: "string"},
+		{name: "number", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-fixture", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7.0}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "number"`, wantActualType: "number"},
+		{name: "null", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-fixture", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "null"`, wantActualType: "null"},
+		{name: "array", pluginID: "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-fixture", instanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}}, wantErr: `nested instance config property "settings.labels.naming" value type must match declared type "object", got "array"`, wantActualType: "array"},
 	}
 
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit array-valued bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit array-valued bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":["oops"]}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].([]any)
-	if !ok || len(prefix) != 1 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value to pass through unchanged, got %+v", decoded)
-	}
-	first, ok := prefix[0].(string)
-	if !ok || first != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued bad value member to stay unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": []any{"oops"}}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit array-valued bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitWrongTypeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitWrongTypeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit wrong-type bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit wrong-type bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":true}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit wrong-type bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit wrong-type bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(bool)
-	if !ok || !prefix {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit wrong-type bad value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitWrongTypeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitWrongTypeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": true}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-wrong-type-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit wrong-type bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectValuedBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectValuedBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit object-valued bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit object-valued bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":{"prefix":{"bad":true}}}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected naming object to remain present, got %+v", decoded)
-	}
-	prefix, ok := naming["prefix"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value to pass through unchanged, got %+v", decoded)
-	}
-	bad, ok := prefix["bad"].(bool)
-	if !ok || !bad {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-valued bad value member to stay unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectValuedBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectValuedBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": map[string]any{"prefix": map[string]any{"bad": true}}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-valued-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit object-valued bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit object-node bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit object-node bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":true}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-node bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-node bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(bool)
-	if !ok || !naming {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit object-node bad value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitObjectNodeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": true}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-object-node-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit object-node bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitStringValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitStringValuedObjectNodeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":"oops"}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(string)
-	if !ok || naming != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitStringValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitStringValuedObjectNodeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": "oops"}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-string-valued-object-node-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit string-valued object-node bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNumberValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNumberValuedObjectNodeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":7}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].(float64)
-	if !ok || naming != 7 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNumberValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNumberValuedObjectNodeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": 7}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-number-valued-object-node-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit number-valued object-node bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNullValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNullValuedObjectNodeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":null}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, exists := labels["naming"]
-	if !exists || naming != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value to pass through unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNullValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitNullValuedObjectNodeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": nil}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-null-valued-object-node-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit null-valued object-node bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
-	}
-}
-
-func TestBuildSubprocessHostRequestPreservesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-request",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedObjectNodeBadValueRequest",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-request", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}},
-	}
-
-	request, err := buildSubprocessHostRequest("event", json.RawMessage(`{"event":"ok"}`), plugin)
-	if err != nil {
-		t.Fatalf("expected request build to preserve beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value without rejection, got %v", err)
-	}
-	if request.InstanceConfig == nil {
-		t.Fatal("expected host request to preserve beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value payload")
-	}
-	if string(request.InstanceConfig) != `{"settings":{"labels":{"naming":["oops"]}}}` {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value payload to remain unmodified in raw payload, got %s", string(request.InstanceConfig))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(request.InstanceConfig, &decoded); err != nil {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value payload to remain decodable, got %v", err)
-	}
-	settings, ok := decoded["settings"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected settings object to remain present, got %+v", decoded)
-	}
-	labels, ok := settings["labels"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected labels object to remain present, got %+v", decoded)
-	}
-	naming, ok := labels["naming"].([]any)
-	if !ok || len(naming) != 1 {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value to pass through unchanged, got %+v", decoded)
-	}
-	first, ok := naming[0].(string)
-	if !ok || first != "oops" {
-		t.Fatalf("expected beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value member to stay unchanged, got %+v", decoded)
-	}
-}
-
-func TestBuiltSubprocessFixtureReceivesBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedObjectNodeBadValue(t *testing.T) {
-	t.Parallel()
-
-	host := NewSubprocessPluginHost(testBuiltPluginProcessFactory(t, "assert-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-not-enforced"))
-	t.Cleanup(func() { shutdownSubprocessHostForTest(host) })
-	plugin := pluginsdk.Plugin{
-		Manifest: pluginsdk.PluginManifest{
-			ID:         "plugin-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-fixture",
-			Name:       "InstanceConfigBeyondSupportedDeeperNestedRequiredEnumDefaultExplicitArrayValuedObjectNodeBadValueFixture",
-			Version:    "0.1.0",
-			APIVersion: "v0",
-			Mode:       pluginsdk.ModeSubprocess,
-			ConfigSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"settings": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"labels": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"naming": map[string]any{
-										"type":     "object",
-										"required": []any{"prefix"},
-										"properties": map[string]any{
-											"prefix": map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Entry: pluginsdk.PluginEntry{Module: "plugins/instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value-fixture", Symbol: "Plugin"},
-		},
-		InstanceConfig: map[string]any{"settings": map[string]any{"labels": map[string]any{"naming": []any{"oops"}}}},
-	}
-	ctx := eventmodel.ExecutionContext{TraceID: "trace-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value", EventID: "evt-instance-config-beyond-supported-deeper-nested-required-enum-default-explicit-array-valued-object-node-bad-value"}
-
-	if err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx); err != nil {
-		t.Fatalf("expected built fixture request to preserve beyond-supported deeper nested required+enum+default explicit array-valued object-node bad value without rejection, got %v", err)
-	}
-
-	stdout := strings.Join(host.StdoutLines(), "\n")
-	for _, expected := range []string{"handshake-ready", "event-ok"} {
-		if !strings.Contains(stdout, expected) {
-			t.Fatalf("expected built fixture stdout to include %q, got %s", expected, stdout)
-		}
-	}
-	stderr := strings.Join(host.StderrLines(), "\n")
-	if !strings.Contains(stderr, "stderr-online") {
-		t.Fatalf("expected built fixture stderr capture, got %s", stderr)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			launches := 0
+			logs := &bytes.Buffer{}
+			tracer := NewTraceRecorder()
+			metrics := NewMetricsRegistry()
+			host := NewSubprocessPluginHost(func(ctx context.Context) *exec.Cmd {
+				launches++
+				return testPluginProcessFactory(t, "echo")(ctx)
+			})
+			host.SetObservability(NewLogger(logs), tracer, metrics)
+			plugin := pluginsdk.Plugin{
+				Manifest:       testBeyondSupportedDeeperNestedNamingManifest(tc.pluginID, tc.pluginID, "plugins/"+tc.pluginID, map[string]any{"type": "string", "enum": []any{"hello", "world"}, "default": "hello"}, true),
+				InstanceConfig: tc.instanceConfig,
+			}
+			ctx := eventmodel.ExecutionContext{TraceID: "trace-" + tc.pluginID, EventID: "evt-" + tc.pluginID, PluginID: tc.pluginID, CorrelationID: "corr-" + tc.pluginID}
+			err := host.DispatchEvent(context.Background(), plugin, testPluginEvent(), ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected host rejection containing %q, got %v", tc.wantErr, err)
+			}
+			if launches != 0 {
+				t.Fatalf("expected host rejection before subprocess launch, launches=%d", launches)
+			}
+			if len(host.StdoutLines()) != 0 || len(host.StderrLines()) != 0 {
+				t.Fatalf("expected host rejection to avoid subprocess side effects, stdout=%v stderr=%v", host.StdoutLines(), host.StderrLines())
+			}
+			for _, expected := range []string{"subprocess host instance config rejected", `"failure_stage":"instance_config"`, `"failure_reason":"instance_config_value_type_mismatch"`, `"compatibility_rule":"instance_config_deeper_nested_value_type"`, `"property_name":"settings.labels.naming"`, `"parent_property_name":"settings.labels"`, `"nested_property_name":"naming"`, `"root_property_name":"settings"`, `"intermediate_property_name":"labels"`, `"declared_type":"object"`, `"actual_type":"` + tc.wantActualType + `"`} {
+				if !strings.Contains(logs.String(), expected) {
+					t.Fatalf("expected host rejection log %q, got %s", expected, logs.String())
+				}
+			}
+			rendered := tracer.RenderTrace("trace-" + tc.pluginID)
+			if !strings.Contains(rendered, "plugin_host.instance_config") {
+				t.Fatalf("expected instance config trace span, got %s", rendered)
+			}
+			if strings.Contains(rendered, "plugin_host.dispatch") {
+				t.Fatalf("expected rejection to stop before dispatch span, got %s", rendered)
+			}
+			if !strings.Contains(metrics.RenderPrometheus(), fmt.Sprintf(`bot_platform_plugin_errors_total{plugin_id=%q} 1`, tc.pluginID)) {
+				t.Fatalf("expected plugin error metric, got %s", metrics.RenderPrometheus())
+			}
+		})
 	}
 }
 

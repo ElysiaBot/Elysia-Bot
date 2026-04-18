@@ -1136,12 +1136,14 @@ func main() {
 					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing deeper nested labels object in instance_config payload\"}\n")
 					continue
 				}
-				if len(labels) != 0 {
-					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"unexpected beyond-supported deeper nested required+enum+default child omission mutation in instance_config payload\"}\n")
+				naming, ok := labels["naming"].(map[string]any)
+				if !ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing synthesized beyond-supported naming object in instance_config payload\"}\n")
 					continue
 				}
-				if _, exists := labels["naming"]; exists {
-					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"unexpected beyond-supported deeper nested required+enum+default child omission naming key in instance_config payload\"}\n")
+				prefix, ok := naming["prefix"].(string)
+				if !ok || prefix != "hello" {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing synthesized beyond-supported deeper nested child omission default in instance_config payload\"}\n")
 					continue
 				}
 			}
@@ -1232,6 +1234,47 @@ func main() {
 				prefix, ok := naming["prefix"].(string)
 				if !ok || prefix != "oops" {
 					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"unexpected beyond-supported deeper nested required+enum+default explicit bad value in instance_config payload\"}\n")
+					continue
+				}
+			}
+			if mode == "assert-instance-config-beyond-supported-deeper-nested-default-merged" {
+				var requestEnvelope map[string]json.RawMessage
+				if err := json.Unmarshal([]byte(line), &requestEnvelope); err != nil {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"failed to decode host request envelope\"}\n")
+					continue
+				}
+				if _, ok := requestEnvelope["config"]; ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"unexpected config field in host request\"}\n")
+					continue
+				}
+				rawInstanceConfig, ok := requestEnvelope["instance_config"]
+				if !ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing instance_config field in host request\"}\n")
+					continue
+				}
+				var instanceConfig map[string]any
+				if err := json.Unmarshal(rawInstanceConfig, &instanceConfig); err != nil {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"failed to decode instance_config payload\"}\n")
+					continue
+				}
+				settings, ok := instanceConfig["settings"].(map[string]any)
+				if !ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing nested settings object in instance_config payload\"}\n")
+					continue
+				}
+				labels, ok := settings["labels"].(map[string]any)
+				if !ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing deeper nested labels object in instance_config payload\"}\n")
+					continue
+				}
+				naming, ok := labels["naming"].(map[string]any)
+				if !ok {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"missing beyond-supported naming object in instance_config payload\"}\n")
+					continue
+				}
+				prefix, ok := naming["prefix"].(string)
+				if !ok || prefix != "hello" {
+					_, _ = os.Stdout.WriteString("{\"type\":\"event\",\"status\":\"error\",\"error\":\"expected merged beyond-supported deeper nested default in instance_config payload\"}\n")
 					continue
 				}
 			}

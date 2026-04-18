@@ -248,13 +248,14 @@ func buildSubprocessHostRequest(requestType string, payload json.RawMessage, plu
 }
 
 func marshalSubprocessInstanceConfig(manifest pluginsdk.PluginManifest, instanceConfig map[string]any) (json.RawMessage, error) {
-	if err := validateSubprocessInstanceConfig(manifest, instanceConfig); err != nil {
+	mergedConfig, err := normalizeSubprocessInstanceConfig(manifest, instanceConfig)
+	if err != nil {
 		return nil, err
 	}
-	if len(instanceConfig) == 0 {
+	if len(mergedConfig) == 0 {
 		return nil, nil
 	}
-	encoded, err := json.Marshal(instanceConfig)
+	encoded, err := json.Marshal(mergedConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -262,49 +263,27 @@ func marshalSubprocessInstanceConfig(manifest pluginsdk.PluginManifest, instance
 }
 
 func validateSubprocessInstanceConfig(manifest pluginsdk.PluginManifest, instanceConfig map[string]any) error {
+	_, err := normalizeSubprocessInstanceConfig(manifest, instanceConfig)
+	return err
+}
+
+func normalizeSubprocessInstanceConfig(manifest pluginsdk.PluginManifest, instanceConfig map[string]any) (map[string]any, error) {
+	mergedConfig := cloneSubprocessConfigObject(instanceConfig)
 	if manifest.ConfigSchema == nil {
-		return nil
+		return mergedConfig, nil
 	}
 	rawProperties, ok := manifest.ConfigSchema["properties"].(map[string]any)
 	if !ok {
-		return nil
+		return mergedConfig, nil
 	}
-	if rawRequired, hasRequired := manifest.ConfigSchema["required"]; hasRequired {
-		requiredFields, ok := rawRequired.([]any)
-		if ok {
-			for _, item := range requiredFields {
-				name, ok := item.(string)
-				if !ok {
-					continue
-				}
-				name = strings.TrimSpace(name)
-				if name == "" {
-					continue
-				}
-				if _, exists := instanceConfig[name]; exists {
-					continue
-				}
-				metadata := map[string]any{"property_name": name}
-				if propertySchema, ok := rawProperties[name].(map[string]any); ok {
-					if propertyType, _ := propertySchema["type"].(string); strings.TrimSpace(propertyType) != "" {
-						metadata["declared_type"] = strings.TrimSpace(propertyType)
-					}
-				}
-				return &subprocessInstanceConfigFailure{
-					manifest:          manifest,
-					reason:            subprocessFailureReasonInstanceConfigMissingRequired,
-					compatibilityRule: "instance_config_top_level_required",
-					metadata:          metadata,
-					detail:            fmt.Sprintf("plugin %q instance config required property %q must be provided", manifest.ID, name),
-				}
-			}
-		}
+	if err := validateSubprocessTopLevelRequiredInstanceConfig(manifest, rawProperties, mergedConfig); err != nil {
+		return nil, err
 	}
-	if len(instanceConfig) == 0 {
-		return nil
+	if len(mergedConfig) == 0 {
+		return mergedConfig, nil
 	}
 	for name, rawProperty := range rawProperties {
-		value, exists := instanceConfig[name]
+		value, exists := mergedConfig[name]
 		if !exists {
 			continue
 		}
@@ -319,27 +298,71 @@ func validateSubprocessInstanceConfig(manifest pluginsdk.PluginManifest, instanc
 		}
 		if propertyType == "object" {
 			if err := validateNestedSubprocessInstanceConfigValueType(manifest, name, propertySchema, value); err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
-		actualType := describeSubprocessConfigValueType(value)
-		if subprocessConfigValueMatchesDeclaredType(propertyType, value) {
+		if err := validateSubprocessTopLevelInstanceConfigValueType(manifest, name, propertyType, value); err != nil {
+			return nil, err
+		}
+	}
+	return mergedConfig, nil
+}
+
+func validateSubprocessTopLevelRequiredInstanceConfig(manifest pluginsdk.PluginManifest, rawProperties map[string]any, instanceConfig map[string]any) error {
+	rawRequired, hasRequired := manifest.ConfigSchema["required"]
+	if !hasRequired {
+		return nil
+	}
+	requiredFields, ok := rawRequired.([]any)
+	if !ok {
+		return nil
+	}
+	for _, item := range requiredFields {
+		name, ok := item.(string)
+		if !ok {
 			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := instanceConfig[name]; exists {
+			continue
+		}
+		metadata := map[string]any{"property_name": name}
+		if propertySchema, ok := rawProperties[name].(map[string]any); ok {
+			if propertyType, _ := propertySchema["type"].(string); strings.TrimSpace(propertyType) != "" {
+				metadata["declared_type"] = strings.TrimSpace(propertyType)
+			}
 		}
 		return &subprocessInstanceConfigFailure{
 			manifest:          manifest,
-			reason:            subprocessFailureReasonInstanceConfigValueTypeMismatch,
-			compatibilityRule: "instance_config_top_level_value_type",
-			metadata: map[string]any{
-				"property_name": name,
-				"declared_type": propertyType,
-				"actual_type":   actualType,
-			},
-			detail: fmt.Sprintf("plugin %q instance config property %q value type must match declared type %q, got %q", manifest.ID, name, propertyType, actualType),
+			reason:            subprocessFailureReasonInstanceConfigMissingRequired,
+			compatibilityRule: "instance_config_top_level_required",
+			metadata:          metadata,
+			detail:            fmt.Sprintf("plugin %q instance config required property %q must be provided", manifest.ID, name),
 		}
 	}
 	return nil
+}
+
+func validateSubprocessTopLevelInstanceConfigValueType(manifest pluginsdk.PluginManifest, propertyName string, propertyType string, value any) error {
+	if subprocessConfigValueMatchesDeclaredType(propertyType, value) {
+		return nil
+	}
+	actualType := describeSubprocessConfigValueType(value)
+	return &subprocessInstanceConfigFailure{
+		manifest:          manifest,
+		reason:            subprocessFailureReasonInstanceConfigValueTypeMismatch,
+		compatibilityRule: "instance_config_top_level_value_type",
+		metadata: map[string]any{
+			"property_name": propertyName,
+			"declared_type": propertyType,
+			"actual_type":   actualType,
+		},
+		detail: fmt.Sprintf("plugin %q instance config property %q value type must match declared type %q, got %q", manifest.ID, propertyName, propertyType, actualType),
+	}
 }
 
 func validateNestedSubprocessInstanceConfigValueType(manifest pluginsdk.PluginManifest, propertyName string, propertySchema map[string]any, value any) error {
@@ -407,17 +430,35 @@ func validateDeeperNestedSubprocessInstanceConfigValueType(manifest pluginsdk.Pl
 	}
 	parentPropertyPath := fmt.Sprintf("%s.%s", propertyName, childName)
 	for grandchildName, rawGrandchildProperty := range rawProperties {
-		grandchildValue, exists := objectValue[grandchildName]
-		if !exists {
-			continue
-		}
 		grandchildSchema, ok := rawGrandchildProperty.(map[string]any)
 		if !ok {
 			continue
 		}
 		grandchildType, _ := grandchildSchema["type"].(string)
 		grandchildType = strings.TrimSpace(grandchildType)
-		if grandchildType == "" || grandchildType == "object" {
+		if grandchildType == "" {
+			continue
+		}
+		grandchildValue, exists := objectValue[grandchildName]
+		if !exists {
+			if grandchildType != "object" {
+				continue
+			}
+			grandchildValue = map[string]any{}
+			objectValue[grandchildName] = grandchildValue
+			exists = true
+		}
+		if !exists {
+			continue
+		}
+		if grandchildType == "object" {
+			grandchildObject, ok := grandchildValue.(map[string]any)
+			if !ok {
+				return newSubprocessNestedInstanceConfigValueTypeFailure(manifest, []string{propertyName, childName, grandchildName}, grandchildType, grandchildValue)
+			}
+			if err := mergeAndValidateSubprocessInstanceConfigObjectBranch(manifest, []string{propertyName, childName, grandchildName}, grandchildSchema, grandchildObject); err != nil {
+				return err
+			}
 			continue
 		}
 		actualType := describeSubprocessConfigValueType(grandchildValue)
@@ -525,6 +566,226 @@ func validateDeeperNestedSubprocessInstanceConfigMissingRequired(manifest plugin
 		}
 	}
 	return nil
+}
+
+func mergeAndValidateSubprocessInstanceConfigObjectBranch(manifest pluginsdk.PluginManifest, propertyPath []string, propertySchema map[string]any, objectValue map[string]any) error {
+	if err := validateSubprocessNestedInstanceConfigRequired(manifest, propertyPath, propertySchema, objectValue); err != nil {
+		return err
+	}
+	rawProperties, ok := propertySchema["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for childName, rawChildProperty := range rawProperties {
+		childValue, exists := objectValue[childName]
+		if !exists {
+			continue
+		}
+		childSchema, ok := rawChildProperty.(map[string]any)
+		if !ok {
+			continue
+		}
+		childType, _ := childSchema["type"].(string)
+		childType = strings.TrimSpace(childType)
+		if childType == "" {
+			continue
+		}
+		childPath := append(append([]string(nil), propertyPath...), childName)
+		if childType == "object" {
+			childObject, ok := childValue.(map[string]any)
+			if !ok {
+				return newSubprocessNestedInstanceConfigValueTypeFailure(manifest, childPath, childType, childValue)
+			}
+			if err := mergeAndValidateSubprocessInstanceConfigObjectBranch(manifest, childPath, childSchema, childObject); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := validateSubprocessNestedInstanceConfigLeafValue(manifest, childPath, childType, childSchema, childValue); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSubprocessNestedInstanceConfigRequired(manifest pluginsdk.PluginManifest, propertyPath []string, propertySchema map[string]any, objectValue map[string]any) error {
+	rawProperties, ok := propertySchema["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	requiredFields := map[string]struct{}{}
+	if rawRequired, hasRequired := propertySchema["required"]; hasRequired {
+		if entries, ok := rawRequired.([]any); ok {
+			for _, item := range entries {
+				name, ok := item.(string)
+				if !ok {
+					continue
+				}
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
+				requiredFields[name] = struct{}{}
+			}
+		}
+	}
+	for childName, rawChildProperty := range rawProperties {
+		if _, exists := objectValue[childName]; exists {
+			continue
+		}
+		childSchema, ok := rawChildProperty.(map[string]any)
+		if !ok {
+			continue
+		}
+		childType, _ := childSchema["type"].(string)
+		childType = strings.TrimSpace(childType)
+		if childType == "" || childType == "object" {
+			continue
+		}
+		if defaultValue, ok := subprocessConfigLeafDefaultValue(childType, childSchema); ok {
+			objectValue[childName] = defaultValue
+			continue
+		}
+		if _, required := requiredFields[childName]; required {
+			return newSubprocessNestedInstanceConfigRequiredFailure(manifest, append(append([]string(nil), propertyPath...), childName), childSchema)
+		}
+	}
+	return nil
+}
+
+func validateSubprocessNestedInstanceConfigLeafValue(manifest pluginsdk.PluginManifest, propertyPath []string, propertyType string, propertySchema map[string]any, value any) error {
+	if !subprocessConfigValueMatchesDeclaredType(propertyType, value) {
+		return newSubprocessNestedInstanceConfigValueTypeFailure(manifest, propertyPath, propertyType, value)
+	}
+	return validateSubprocessNestedInstanceConfigEnumValue(manifest, propertyPath, propertyType, propertySchema, value)
+}
+
+func validateSubprocessNestedInstanceConfigEnumValue(manifest pluginsdk.PluginManifest, propertyPath []string, propertyType string, propertySchema map[string]any, value any) error {
+	rawEnumValues, hasEnum := propertySchema["enum"]
+	if !hasEnum {
+		return nil
+	}
+	enumValues, ok := subprocessConfigEnumValues(rawEnumValues)
+	if !ok || len(enumValues) == 0 {
+		return nil
+	}
+	for _, enumValue := range enumValues {
+		if subprocessConfigValuesEqual(propertyType, enumValue, value) {
+			return nil
+		}
+	}
+	return newSubprocessNestedInstanceConfigEnumFailure(manifest, propertyPath, propertyType, value, enumValues)
+}
+
+func newSubprocessNestedInstanceConfigValueTypeFailure(manifest pluginsdk.PluginManifest, propertyPath []string, propertyType string, value any) error {
+	metadata := subprocessNestedInstanceConfigMetadata(propertyPath)
+	actualType := describeSubprocessConfigValueType(value)
+	metadata["declared_type"] = propertyType
+	metadata["actual_type"] = actualType
+	propertyPathText := strings.Join(propertyPath, ".")
+	return &subprocessInstanceConfigFailure{
+		manifest:          manifest,
+		reason:            subprocessFailureReasonInstanceConfigValueTypeMismatch,
+		compatibilityRule: subprocessNestedInstanceConfigCompatibilityRule("value_type", propertyPath),
+		metadata:          metadata,
+		detail:            fmt.Sprintf("plugin %q nested instance config property %q value type must match declared type %q, got %q", manifest.ID, propertyPathText, propertyType, actualType),
+	}
+}
+
+func newSubprocessNestedInstanceConfigEnumFailure(manifest pluginsdk.PluginManifest, propertyPath []string, propertyType string, value any, enumValues []any) error {
+	metadata := subprocessNestedInstanceConfigMetadata(propertyPath)
+	metadata["declared_type"] = propertyType
+	metadata["actual_value"] = value
+	metadata["enum_values"] = enumValues
+	propertyPathText := strings.Join(propertyPath, ".")
+	return &subprocessInstanceConfigFailure{
+		manifest:          manifest,
+		reason:            subprocessFailureReasonInstanceConfigEnumValueOutOfSet,
+		compatibilityRule: subprocessNestedInstanceConfigCompatibilityRule("enum", propertyPath),
+		metadata:          metadata,
+		detail:            fmt.Sprintf("plugin %q nested instance config property %q value %s must be declared in enum %s for declared type %q", manifest.ID, propertyPathText, describeSubprocessConfigValue(value), describeSubprocessConfigValue(enumValues), propertyType),
+	}
+}
+
+func newSubprocessNestedInstanceConfigRequiredFailure(manifest pluginsdk.PluginManifest, propertyPath []string, propertySchema map[string]any) error {
+	metadata := subprocessNestedInstanceConfigMetadata(propertyPath)
+	if propertyType, _ := propertySchema["type"].(string); strings.TrimSpace(propertyType) != "" {
+		metadata["declared_type"] = strings.TrimSpace(propertyType)
+	}
+	propertyPathText := strings.Join(propertyPath, ".")
+	return &subprocessInstanceConfigFailure{
+		manifest:          manifest,
+		reason:            subprocessFailureReasonInstanceConfigMissingRequired,
+		compatibilityRule: subprocessNestedInstanceConfigCompatibilityRule("required", propertyPath),
+		metadata:          metadata,
+		detail:            fmt.Sprintf("plugin %q nested instance config required property %q must be provided", manifest.ID, propertyPathText),
+	}
+}
+
+func subprocessNestedInstanceConfigMetadata(propertyPath []string) map[string]any {
+	metadata := map[string]any{
+		"property_name":        strings.Join(propertyPath, "."),
+		"nested_property_name": propertyPath[len(propertyPath)-1],
+	}
+	if len(propertyPath) > 1 {
+		metadata["parent_property_name"] = strings.Join(propertyPath[:len(propertyPath)-1], ".")
+	}
+	if len(propertyPath) > 2 {
+		metadata["root_property_name"] = propertyPath[0]
+		metadata["intermediate_property_name"] = strings.Join(propertyPath[1:len(propertyPath)-1], ".")
+	}
+	return metadata
+}
+
+func subprocessNestedInstanceConfigCompatibilityRule(suffix string, propertyPath []string) string {
+	if len(propertyPath) <= 2 {
+		return "instance_config_nested_" + suffix
+	}
+	return "instance_config_deeper_nested_" + suffix
+}
+
+func subprocessConfigLeafDefaultValue(propertyType string, propertySchema map[string]any) (any, bool) {
+	propertyType = strings.TrimSpace(propertyType)
+	if propertyType == "" || propertyType == "object" {
+		return nil, false
+	}
+	defaultValue, hasDefault := propertySchema["default"]
+	if !hasDefault || !subprocessConfigValueMatchesDeclaredType(propertyType, defaultValue) {
+		return nil, false
+	}
+	if rawEnumValues, hasEnum := propertySchema["enum"]; hasEnum {
+		enumValues, ok := subprocessConfigEnumValues(rawEnumValues)
+		if !ok || !subprocessConfigEnumContainsDefault(propertyType, enumValues, defaultValue) {
+			return nil, false
+		}
+	}
+	return cloneSubprocessConfigValue(defaultValue), true
+}
+
+func cloneSubprocessConfigObject(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = cloneSubprocessConfigValue(value)
+	}
+	return cloned
+}
+
+func cloneSubprocessConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneSubprocessConfigObject(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneSubprocessConfigValue(item)
+		}
+		return cloned
+	default:
+		return typed
+	}
 }
 
 func (h *SubprocessPluginHost) dispatchRequest(ctx context.Context, pluginID string, request hostRequest, executionContext eventmodel.ExecutionContext) (err error) {

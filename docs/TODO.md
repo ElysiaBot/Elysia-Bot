@@ -14,10 +14,6 @@
 
 ## Backlog
 
-### A4. subprocess 实例配置递归校验补全
-- 当前实例配置校验仍有明确的深层递归边界。
-- 需要继续推进 deeper nested required / enum / default / type 协同行为与 default merge 语义。
-
 ### A5. Postgres 可信度继续补强
 - 目前 Postgres 只进入 smoke/store 路径，不是主存储。
 - 需要补更多真实 runtime 路径覆盖、失败语义和与 SQLite 的能力对齐。
