@@ -28,9 +28,11 @@ const (
 	webhookTokenSecretConfigRef     = "secrets.webhook_token_ref"
 	webhookTokenSecretDefaultDevRef = "BOT_PLATFORM_WEBHOOK_TOKEN"
 	webhookTokenSecretConsumer      = "adapter-webhook.NewWithSecretRef"
+	aiChatAPIKeySecretConfigRef     = "secrets.ai_chat_api_key_ref"
+	aiChatAPIKeySecretConsumer      = "apps/runtime.buildAIProvider"
 )
 
-type WebhookSecretContract struct {
+type SecretContract struct {
 	ConfigRef     string `json:"configRef"`
 	DefaultDevRef string `json:"defaultDevRef"`
 	Consumer      string `json:"consumer"`
@@ -38,25 +40,26 @@ type WebhookSecretContract struct {
 }
 
 type SecretPolicyDeclaration struct {
-	Provider              string                `json:"provider"`
-	RefPrefix             string                `json:"refPrefix"`
-	RefFormat             string                `json:"refFormat"`
-	RuntimeOwned          bool                  `json:"runtimeOwned"`
-	MainPathContract      WebhookSecretContract `json:"mainPathContract"`
-	ConfigRefs            []string              `json:"configRefs,omitempty"`
-	ActiveConsumers       []string              `json:"activeConsumers,omitempty"`
-	IntegrationPoints     []string              `json:"integrationPoints,omitempty"`
-	AuditAction           string                `json:"auditAction,omitempty"`
-	AuditOutcomes         []string              `json:"auditOutcomes,omitempty"`
-	UnsupportedModes      []string              `json:"unsupportedModes,omitempty"`
-	VerificationEndpoints []string              `json:"verificationEndpoints,omitempty"`
-	Facts                 []string              `json:"facts,omitempty"`
-	Summary               string                `json:"summary,omitempty"`
+	Provider              string           `json:"provider"`
+	RefPrefix             string           `json:"refPrefix"`
+	RefFormat             string           `json:"refFormat"`
+	RuntimeOwned          bool             `json:"runtimeOwned"`
+	MainPathContract      SecretContract   `json:"mainPathContract"`
+	AdditionalContracts   []SecretContract `json:"additionalContracts,omitempty"`
+	ConfigRefs            []string         `json:"configRefs,omitempty"`
+	ActiveConsumers       []string         `json:"activeConsumers,omitempty"`
+	IntegrationPoints     []string         `json:"integrationPoints,omitempty"`
+	AuditAction           string           `json:"auditAction,omitempty"`
+	AuditOutcomes         []string         `json:"auditOutcomes,omitempty"`
+	UnsupportedModes      []string         `json:"unsupportedModes,omitempty"`
+	VerificationEndpoints []string         `json:"verificationEndpoints,omitempty"`
+	Facts                 []string         `json:"facts,omitempty"`
+	Summary               string           `json:"summary,omitempty"`
 }
 
-func WebhookSecretMainPathContract() WebhookSecretContract {
+func WebhookSecretMainPathContract() SecretContract {
 	pathNote := webhookTokenSecretConfigRef + " -> " + webhookTokenSecretConsumer + " -> SecretRegistry.Resolve"
-	return WebhookSecretContract{
+	return SecretContract{
 		ConfigRef:     webhookTokenSecretConfigRef,
 		DefaultDevRef: webhookTokenSecretDefaultDevRef,
 		Consumer:      webhookTokenSecretConsumer,
@@ -64,17 +67,33 @@ func WebhookSecretMainPathContract() WebhookSecretContract {
 	}
 }
 
+func AIChatAPIKeySecretConfigRef() string {
+	return aiChatAPIKeySecretConfigRef
+}
+
+func AIChatAPIKeySecretContract() SecretContract {
+	pathNote := aiChatAPIKeySecretConfigRef + " -> " + aiChatAPIKeySecretConsumer + " -> SecretRegistry.Resolve"
+	return SecretContract{
+		ConfigRef:     aiChatAPIKeySecretConfigRef,
+		DefaultDevRef: "",
+		Consumer:      aiChatAPIKeySecretConsumer,
+		PathNote:      pathNote,
+	}
+}
+
 func SecretPolicy() SecretPolicyDeclaration {
 	contract := WebhookSecretMainPathContract()
+	aiChatContract := AIChatAPIKeySecretContract()
 	declaration := SecretPolicyDeclaration{
 		Provider:              secretProviderEnv,
 		RefPrefix:             secretRefPrefix,
 		RefFormat:             "BOT_PLATFORM_[A-Z0-9_]+",
 		RuntimeOwned:          true,
 		MainPathContract:      contract,
-		ConfigRefs:            []string{contract.ConfigRef},
-		ActiveConsumers:       []string{"adapter-webhook"},
-		IntegrationPoints:     []string{contract.ConfigRef, contract.Consumer},
+		AdditionalContracts:   []SecretContract{aiChatContract},
+		ConfigRefs:            []string{contract.ConfigRef, aiChatContract.ConfigRef},
+		ActiveConsumers:       []string{"adapter-webhook", "apps/runtime"},
+		IntegrationPoints:     []string{contract.ConfigRef, contract.Consumer, aiChatContract.ConfigRef, aiChatContract.Consumer},
 		AuditAction:           "secret.read",
 		AuditOutcomes:         []string{"success", secretFailureInvalidRef, secretFailureNotFound, secretFailureReadCanceled, secretFailureGenericReadFail},
 		UnsupportedModes:      []string{"multi-provider", "secret-write-api", "rotation", "versioning", "scope-based-secret-authorization", "console-secret-management", "plugin-secret-injection"},
@@ -82,11 +101,11 @@ func SecretPolicy() SecretPolicyDeclaration {
 		Facts: []string{
 			"secret refs must be runtime-owned BOT_PLATFORM_* names and may contain only A-Z, 0-9, and _",
 			"the only provider wired today is environment-variable lookup via EnvSecretProvider",
-			"the only real config-to-read path wired today is " + contract.PathNote,
+			"real config-to-read paths wired today are " + contract.PathNote + " and " + aiChatContract.PathNote,
 			"every registry resolve records secret.read audit with success or failure reason while webhook clients still receive only generic secret resolution failures",
 		},
 	}
-	declaration.Summary = "provider=env; runtime-owned BOT_PLATFORM_* refs only; current active read path is " + contract.ConfigRef + " -> " + contract.Consumer + "; every resolve records secret.read audit; no multi-provider or secret write API"
+	declaration.Summary = "provider=env; runtime-owned BOT_PLATFORM_* refs only; current active read paths are " + contract.ConfigRef + " -> " + contract.Consumer + " and " + aiChatContract.ConfigRef + " -> " + aiChatContract.Consumer + "; every resolve records secret.read audit; no multi-provider or secret write API"
 	return declaration
 }
 

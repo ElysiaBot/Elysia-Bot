@@ -2,6 +2,8 @@ package runtimecore
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 
 type Config struct {
 	Runtime RuntimeConfig `yaml:"runtime"`
+	AIChat  AIChatConfig  `yaml:"ai_chat,omitempty"`
 	Secrets SecretsConfig `yaml:"secrets,omitempty"`
 	RBAC    *RBACConfig   `yaml:"rbac,omitempty"`
 }
@@ -37,8 +40,16 @@ type RuntimeBotInstance struct {
 	SelfID   int64  `yaml:"self_id,omitempty"`
 }
 
+type AIChatConfig struct {
+	Provider         string `yaml:"provider,omitempty"`
+	Endpoint         string `yaml:"endpoint,omitempty"`
+	Model            string `yaml:"model,omitempty"`
+	RequestTimeoutMs int    `yaml:"request_timeout_ms,omitempty"`
+}
+
 type SecretsConfig struct {
 	WebhookTokenRef string `yaml:"webhook_token_ref,omitempty"`
+	AIChatAPIKeyRef string `yaml:"ai_chat_api_key_ref,omitempty"`
 }
 
 type RBACConfig struct {
@@ -99,12 +110,20 @@ func LoadConfig(path string) (Config, error) {
 			return Config{}, fmt.Errorf("invalid %s: %w", WebhookSecretMainPathContract().ConfigRef, err)
 		}
 	}
+	if cfg.Secrets.AIChatAPIKeyRef != "" {
+		if err := ValidateSecretRef(cfg.Secrets.AIChatAPIKeyRef); err != nil {
+			return Config{}, fmt.Errorf("invalid %s: %w", AIChatAPIKeySecretConfigRef(), err)
+		}
+	}
 	if err := cfg.RBAC.Validate(); err != nil {
 		return Config{}, err
 	}
 
 	applyEnvOverride(&cfg)
 	applyRuntimeDefaults(&cfg)
+	if err := validateAIChatConfig(cfg.AIChat); err != nil {
+		return Config{}, err
+	}
 	if err := validateRuntimeBotInstances(cfg.Runtime.BotInstances); err != nil {
 		return Config{}, err
 	}
@@ -143,6 +162,15 @@ func applyRuntimeDefaults(cfg *Config) {
 	if cfg.Runtime.SQLitePath == "" {
 		cfg.Runtime.SQLitePath = filepath.Join("data", "dev", "runtime.sqlite")
 	}
+	cfg.AIChat.Provider = strings.ToLower(strings.TrimSpace(cfg.AIChat.Provider))
+	if cfg.AIChat.Provider == "" {
+		cfg.AIChat.Provider = "mock"
+	}
+	cfg.AIChat.Endpoint = strings.TrimSpace(cfg.AIChat.Endpoint)
+	cfg.AIChat.Model = strings.TrimSpace(cfg.AIChat.Model)
+	if cfg.AIChat.RequestTimeoutMs <= 0 {
+		cfg.AIChat.RequestTimeoutMs = 30000
+	}
 	cfg.Runtime.SmokeStoreBackend = strings.ToLower(strings.TrimSpace(cfg.Runtime.SmokeStoreBackend))
 	cfg.Runtime.PostgresDSN = strings.TrimSpace(cfg.Runtime.PostgresDSN)
 	if cfg.Runtime.SmokeStoreBackend == "" {
@@ -170,6 +198,46 @@ func applyRuntimeDefaults(cfg *Config) {
 			cfg.Runtime.BotInstances[index].DemoPath = "/demo/onebot/message"
 		}
 	}
+}
+
+func validateAIChatConfig(cfg AIChatConfig) error {
+	switch cfg.Provider {
+	case "mock", "openai_compat":
+	default:
+		return fmt.Errorf("ai_chat.provider %q is unsupported; must be \"mock\" or \"openai_compat\"", cfg.Provider)
+	}
+	if cfg.Provider != "openai_compat" {
+		return nil
+	}
+	if cfg.Endpoint == "" {
+		return fmt.Errorf("ai_chat.endpoint is required when ai_chat.provider=openai_compat")
+	}
+	parsed, err := url.ParseRequestURI(cfg.Endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("ai_chat.endpoint must be a valid absolute URL when ai_chat.provider=openai_compat")
+	}
+	if parsed.Scheme != "https" && !isLoopbackAIChatEndpoint(parsed) {
+		return fmt.Errorf("ai_chat.endpoint must use https unless it targets localhost or loopback when ai_chat.provider=openai_compat")
+	}
+	if cfg.Model == "" {
+		return fmt.Errorf("ai_chat.model is required when ai_chat.provider=openai_compat")
+	}
+	return nil
+}
+
+func isLoopbackAIChatEndpoint(parsed *url.URL) bool {
+	if parsed == nil || parsed.Scheme != "http" {
+		return false
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func validateRuntimeBotInstances(instances []RuntimeBotInstance) error {

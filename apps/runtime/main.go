@@ -439,6 +439,12 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 		return nil, fmt.Errorf("selected smoke store backend %q does not implement event journal reader", settings.SmokeStoreBackend)
 	}
 	replayService := &runtimeAppReplayService{journal: replayJournal, runtime: runtime}
+	aiProvider, err := buildAIProvider(context.Background(), config, runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, audits), logger)
+	if err != nil {
+		_ = smokeStore.Close()
+		_ = state.Close()
+		return nil, fmt.Errorf("build ai chat provider: %w", err)
+	}
 
 	echoBinding, ok := pluginConfigs.Lookup("plugin-echo")
 	if !ok {
@@ -472,7 +478,7 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 		_ = state.Close()
 		return nil, fmt.Errorf("save echo plugin manifest: %w", err)
 	}
-	aiPlugin := pluginaichat.New(queue, aiProviderMock{}, state, replies)
+	aiPlugin := pluginaichat.New(queue, aiProvider, state, replies)
 	aiDefinition := aiPlugin.Definition()
 	aiDefinition.Handlers.Event = sourceScopedEventHandler{allowed: allowedSources("runtime-ai"), inner: aiPlugin}
 	if err := runtime.RegisterPlugin(aiDefinition); err != nil {
@@ -565,6 +571,7 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 			"smoke_store_debug_scope": "event_journal+idempotency_keys",
 			"scheduler_interval_ms":   settings.SchedulerIntervalMs,
 			"ai_job_dispatcher":       "runtime-job-queue",
+			"ai_chat_provider":        config.AIChat.Provider,
 			"runtime_worker_id":       runtimeWorkerID(),
 			"console_mode":            "read+operator-plugin-enable-disable+plugin-config",
 		},
@@ -893,10 +900,8 @@ func (a *runtimeApp) handleJobEnqueue(w http.ResponseWriter, r *http.Request) {
 	job := runtimecore.NewJob(payload.ID, payload.Type, maxRetries, 30*time.Second)
 	job.Correlation = payload.CorrelationID
 	if strings.TrimSpace(job.Type) == "ai.chat" {
-		if err := applyDemoAIJobContract(&job, payload.Prompt, payload.UserID); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		http.Error(w, "ai.chat jobs must be created through /demo/ai/message", http.StatusBadRequest)
+		return
 	}
 	if err := a.queue.Enqueue(r.Context(), job); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1531,7 +1536,7 @@ func aiEvent(prompt, userID string) eventmodel.Event {
 		Source:         "runtime-ai",
 		Type:           "message.received",
 		Timestamp:      now,
-		IdempotencyKey: fmt.Sprintf("runtime-ai:%s:%s", userID, prompt),
+		IdempotencyKey: "runtime-ai:" + eventID,
 		Actor:          &eventmodel.Actor{ID: userID, Type: "user", DisplayName: userID},
 		Channel:        &eventmodel.Channel{ID: "group-42", Type: "group", Title: "group-42"},
 		Message:        &eventmodel.Message{ID: "msg-" + eventID, Text: prompt},
@@ -1746,5 +1751,36 @@ func openRuntimeSmokeStore(settings appRuntimeSettings, sqliteState *runtimecore
 		return postgresRuntimeSmokeStore{store: store}, nil
 	default:
 		return nil, fmt.Errorf("open runtime smoke store: unsupported runtime.smoke_store_backend %q", settings.SmokeStoreBackend)
+	}
+}
+
+func buildAIProvider(ctx context.Context, cfg runtimecore.Config, secrets aiProviderSecretResolver, logger *runtimecore.Logger) (pluginaichat.AIProvider, error) {
+	switch cfg.AIChat.Provider {
+	case "", "mock":
+		return aiProviderMock{}, nil
+	case "openai_compat":
+		if strings.TrimSpace(cfg.Secrets.AIChatAPIKeyRef) == "" {
+			return nil, fmt.Errorf("%s is required when ai_chat.provider=openai_compat", runtimecore.AIChatAPIKeySecretConfigRef())
+		}
+		if secrets == nil {
+			return nil, fmt.Errorf("secret resolver is required when ai_chat.provider=openai_compat")
+		}
+		contract := runtimecore.AIChatAPIKeySecretContract()
+		apiKey, err := secrets.Resolve(ctx, cfg.Secrets.AIChatAPIKeyRef, contract.Consumer)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", runtimecore.AIChatAPIKeySecretConfigRef(), err)
+		}
+		return newAIProviderHTTP(aiProviderHTTPConfig{
+			Endpoint:       cfg.AIChat.Endpoint,
+			Model:          cfg.AIChat.Model,
+			Timeout:        time.Duration(cfg.AIChat.RequestTimeoutMs) * time.Millisecond,
+			APIKey:         apiKey,
+			Logger:         logger,
+			Consumer:       contract.Consumer,
+			ProviderKind:   cfg.AIChat.Provider,
+			RequestTimeout: cfg.AIChat.RequestTimeoutMs,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported ai_chat.provider %q", cfg.AIChat.Provider)
 	}
 }

@@ -37,6 +37,50 @@ func writeTestConfigAt(t *testing.T, dir string) string {
 	return path
 }
 
+func writeAIProviderConfigAt(t *testing.T, dir string, endpoint string, model string, timeoutMs int, secretRef string) string {
+	t.Helper()
+	if timeoutMs <= 0 {
+		timeoutMs = 200
+	}
+	path := filepath.Join(dir, "config.yaml")
+	content := "runtime:\n" +
+		"  environment: test\n" +
+		"  log_level: debug\n" +
+		"  http_port: 18080\n" +
+		"  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n" +
+		"  scheduler_interval_ms: 20\n" +
+		"ai_chat:\n" +
+		"  provider: openai_compat\n" +
+		"  endpoint: \"" + strings.ReplaceAll(endpoint, "\"", "\\\"") + "\"\n" +
+		"  model: \"" + strings.ReplaceAll(model, "\"", "\\\"") + "\"\n" +
+		"  request_timeout_ms: " + strconv.Itoa(timeoutMs) + "\n" +
+		"secrets:\n" +
+		"  ai_chat_api_key_ref: " + secretRef + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write ai provider config: %v", err)
+	}
+	return path
+}
+
+func waitForAIJobStatus(t *testing.T, app *runtimeApp, jobID string, expected runtimecore.JobStatus) runtimecore.Job {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		app.queue.DispatchReady(t.Context(), time.Now().UTC())
+		stored, err := app.queue.Inspect(t.Context(), jobID)
+		if err == nil && stored.Status == expected {
+			return stored
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	stored, err := app.queue.Inspect(t.Context(), jobID)
+	if err != nil {
+		t.Fatalf("inspect ai job %q: %v", jobID, err)
+	}
+	t.Fatalf("expected ai job %q to reach status %q, got %+v", jobID, expected, stored)
+	return runtimecore.Job{}
+}
+
 func writeTestConfigWithPostgresSmokeStoreAt(t *testing.T, dir string, dsn string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.yaml")
@@ -586,6 +630,39 @@ func TestRuntimeCLIConfigCheckFailsLoudlyOnBadPostgresDSN(t *testing.T) {
 		t.Fatalf("expected mode check-config, got %+v", result)
 	}
 	for _, expected := range []string{"open runtime smoke store", "postgres"} {
+		if !strings.Contains(result.Error, expected) {
+			t.Fatalf("expected config check error to include %q, got %+v", expected, result)
+		}
+	}
+	if result.HTTPServerStarted {
+		t.Fatalf("expected http_server_started=false, got %+v", result)
+	}
+}
+
+func TestRuntimeCLIConfigCheckFailsLoudlyWhenOpenAICompatSecretMissing(t *testing.T) {
+	configPath := writeAIProviderConfigAt(t, t.TempDir(), "https://example.invalid/v1/chat/completions", "gpt-test", 250, "BOT_PLATFORM_AI_CHAT_API_KEY")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	served := false
+	exitCode := runRuntimeCLI([]string{"-config", configPath, "-check-config"}, &stdout, &stderr, func(addr string, handler http.Handler) error {
+		served = true
+		return nil
+	})
+	if exitCode == 0 {
+		t.Fatal("expected config check to fail when openai_compat api key secret is missing")
+	}
+	if served {
+		t.Fatal("expected failing ai provider config check to exit before starting the HTTP server")
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected empty stdout for config check failure, got %s", stdout.String())
+	}
+	result := decodeRuntimeConfigCheckResult(t, stderr.Bytes())
+	if result.Status != "error" || result.Mode != "check-config" {
+		t.Fatalf("expected config check error result, got %+v", result)
+	}
+	for _, expected := range []string{"build ai chat provider", runtimecore.AIChatAPIKeySecretConfigRef(), "secret \"BOT_PLATFORM_AI_CHAT_API_KEY\" not found in environment"} {
 		if !strings.Contains(result.Error, expected) {
 			t.Fatalf("expected config check error to include %q, got %+v", expected, result)
 		}
@@ -1756,12 +1833,15 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 	}
 	defer func() { _ = app.Close() }()
 
-	enqueueReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-dead-retry-console","type":"ai.chat","prompt":"hello retry","user_id":"user-retry","max_retries":0}`))
-	enqueueReq.Header.Set("Content-Type", "application/json")
-	enqueueResp := httptest.NewRecorder()
-	app.ServeHTTP(enqueueResp, enqueueReq)
-	if enqueueResp.Code != http.StatusOK {
-		t.Fatalf("expected enqueue 200, got %d: %s", enqueueResp.Code, enqueueResp.Body.String())
+	job := runtimecore.NewJob("job-dead-retry-console", "ai.chat", 0, 30*time.Second)
+	job.TraceID = "trace-job-dead-retry-console"
+	job.EventID = "evt-job-dead-retry-console"
+	job.Correlation = "runtime-ai:user-retry:hello retry"
+	if err := applyDemoAIJobContract(&job, "hello retry", "user-retry"); err != nil {
+		t.Fatalf("apply demo ai job contract: %v", err)
+	}
+	if err := app.queue.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue ai retry seed job: %v", err)
 	}
 
 	timeoutReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/timeout?id=job-dead-retry-console", nil)
@@ -1890,12 +1970,15 @@ func TestRuntimeAppRetryDeadLetterOperatorRejectsDuplicateAndInvalidRequestsSafe
 	}
 	defer func() { _ = app.Close() }()
 
-	enqueueReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-dead-retry-once","type":"ai.chat","prompt":"retry once","user_id":"user-retry-once","max_retries":0}`))
-	enqueueReq.Header.Set("Content-Type", "application/json")
-	enqueueResp := httptest.NewRecorder()
-	app.ServeHTTP(enqueueResp, enqueueReq)
-	if enqueueResp.Code != http.StatusOK {
-		t.Fatalf("expected enqueue 200, got %d: %s", enqueueResp.Code, enqueueResp.Body.String())
+	job := runtimecore.NewJob("job-dead-retry-once", "ai.chat", 0, 30*time.Second)
+	job.TraceID = "trace-job-dead-retry-once"
+	job.EventID = "evt-job-dead-retry-once"
+	job.Correlation = "runtime-ai:user-retry-once:retry once"
+	if err := applyDemoAIJobContract(&job, "retry once", "user-retry-once"); err != nil {
+		t.Fatalf("apply demo ai job contract: %v", err)
+	}
+	if err := app.queue.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue ai retry-once seed job: %v", err)
 	}
 
 	timeoutReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/timeout?id=job-dead-retry-once", nil)
@@ -1955,12 +2038,15 @@ func TestRuntimeAppRetryDeadLetterOperatorReturnsForbiddenAndRecordsDeniedAudit(
 	}
 	defer func() { _ = app.Close() }()
 
-	enqueueReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-dead-retry-denied","type":"ai.chat","prompt":"deny retry","user_id":"user-retry-denied","max_retries":0}`))
-	enqueueReq.Header.Set("Content-Type", "application/json")
-	enqueueResp := httptest.NewRecorder()
-	app.ServeHTTP(enqueueResp, enqueueReq)
-	if enqueueResp.Code != http.StatusOK {
-		t.Fatalf("expected enqueue 200, got %d: %s", enqueueResp.Code, enqueueResp.Body.String())
+	job := runtimecore.NewJob("job-dead-retry-denied", "ai.chat", 0, 30*time.Second)
+	job.TraceID = "trace-job-dead-retry-denied"
+	job.EventID = "evt-job-dead-retry-denied"
+	job.Correlation = "runtime-ai:user-retry-denied:deny retry"
+	if err := applyDemoAIJobContract(&job, "deny retry", "user-retry-denied"); err != nil {
+		t.Fatalf("apply demo ai job contract: %v", err)
+	}
+	if err := app.queue.Enqueue(t.Context(), job); err != nil {
+		t.Fatalf("enqueue denied ai retry seed job: %v", err)
 	}
 
 	timeoutReq := httptest.NewRequest(http.MethodPost, "/demo/jobs/timeout?id=job-dead-retry-denied", nil)
@@ -2758,6 +2844,242 @@ func TestRuntimeAppAIMessageQueuesAndReplies(t *testing.T) {
 	t.Fatal("expected AI reply to be recorded")
 }
 
+func TestRuntimeAppAIMessageAllowsRepeatedSamePromptRequests(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	reqBody := `{"prompt":"repeat me","user_id":"user-ai-repeat"}`
+	firstReq := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(reqBody))
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstResp := httptest.NewRecorder()
+	app.ServeHTTP(firstResp, firstReq)
+	if firstResp.Code != http.StatusOK {
+		t.Fatalf("expected first request 200, got %d: %s", firstResp.Code, firstResp.Body.String())
+	}
+	if strings.Contains(firstResp.Body.String(), `"duplicate":true`) || strings.Contains(firstResp.Body.String(), `"duplicate": true`) {
+		t.Fatalf("expected first repeated prompt request not to short-circuit as duplicate, got %s", firstResp.Body.String())
+	}
+	firstJobID := extractAIJobID(firstResp.Body.String())
+	firstStored := waitForAIJobStatus(t, app, firstJobID, runtimecore.JobStatusDone)
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(reqBody))
+	secondReq.Header.Set("Content-Type", "application/json")
+	secondResp := httptest.NewRecorder()
+	app.ServeHTTP(secondResp, secondReq)
+	if secondResp.Code != http.StatusOK {
+		t.Fatalf("expected second request 200, got %d: %s", secondResp.Code, secondResp.Body.String())
+	}
+	if strings.Contains(secondResp.Body.String(), `"duplicate":true`) || strings.Contains(secondResp.Body.String(), `"duplicate": true`) {
+		t.Fatalf("expected second repeated prompt request not to short-circuit as duplicate, got %s", secondResp.Body.String())
+	}
+	secondJobID := extractAIJobID(secondResp.Body.String())
+	if secondJobID == firstJobID {
+		t.Fatalf("expected repeated prompt request to create a distinct job, got first=%q second=%q", firstJobID, secondJobID)
+	}
+	secondStored := waitForAIJobStatus(t, app, secondJobID, runtimecore.JobStatusDone)
+	if firstStored.EventID == secondStored.EventID || firstStored.TraceID == secondStored.TraceID {
+		t.Fatalf("expected repeated prompt request to produce distinct event/trace identity, first=%+v second=%+v", firstStored, secondStored)
+	}
+
+	repliesReq := httptest.NewRequest(http.MethodGet, "/demo/replies", nil)
+	repliesResp := httptest.NewRecorder()
+	app.ServeHTTP(repliesResp, repliesReq)
+	if strings.Count(repliesResp.Body.String(), "AI: repeat me") != 2 {
+		t.Fatalf("expected repeated prompt requests to record two replies, got %s", repliesResp.Body.String())
+	}
+	counts, err := app.runtimeStateCounts(t.Context())
+	if err != nil {
+		t.Fatalf("runtime state counts after repeated ai message requests: %v", err)
+	}
+	if counts["event_journal"] != 2 || counts["idempotency_keys"] != 2 {
+		t.Fatalf("expected repeated ai message requests to persist two events and two distinct idempotency keys, got %+v", counts)
+	}
+}
+
+func TestRuntimeAppDemoJobsEnqueueRejectsAIChatType(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/jobs/enqueue", strings.NewReader(`{"id":"job-ai-chat-enqueue-rejected","type":"ai.chat","prompt":"blocked","user_id":"user-ai-blocked"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected ai.chat generic enqueue rejection 400, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "/demo/ai/message") {
+		t.Fatalf("expected ai.chat enqueue rejection to point callers to /demo/ai/message, got %s", resp.Body.String())
+	}
+	if _, err := app.queue.Inspect(t.Context(), "job-ai-chat-enqueue-rejected"); err == nil {
+		t.Fatal("expected rejected ai.chat enqueue request not to create a queued provider job")
+	}
+	if len(app.replies.Since(0)) != 0 {
+		t.Fatalf("expected rejected ai.chat enqueue request not to dispatch replies, got %+v", app.replies.Since(0))
+	}
+}
+
+func TestRuntimeAppAIMessageQueuesAndRepliesWithOpenAICompatProvider(t *testing.T) {
+	apiKeyRef := "BOT_PLATFORM_AI_CHAT_API_KEY_TEST_SUCCESS"
+	t.Setenv(apiKeyRef, "secret-openai-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST request, got %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-openai-key" {
+			t.Fatalf("expected bearer auth header, got %q", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("expected json content type, got %q", got)
+		}
+		var payload struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode openai compat request: %v", err)
+		}
+		if payload.Model != "gpt-test" {
+			t.Fatalf("expected model gpt-test, got %+v", payload)
+		}
+		if len(payload.Messages) != 1 || payload.Messages[0].Role != "user" || payload.Messages[0].Content != "hello from real provider" {
+			t.Fatalf("unexpected openai compat request payload %+v", payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"openai compat says hi"}}]}`))
+	}))
+	defer server.Close()
+
+	app, err := newRuntimeApp(writeAIProviderConfigAt(t, t.TempDir(), server.URL, "gpt-test", 500, apiKeyRef))
+	if err != nil {
+		t.Fatalf("new runtime app with openai compat provider: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(`{"prompt":"hello from real provider","user_id":"user-ai-openai"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	jobID := extractAIJobID(resp.Body.String())
+	stored := waitForAIJobStatus(t, app, jobID, runtimecore.JobStatusDone)
+	if stored.ReasonCode != "" {
+		t.Fatalf("expected success path to avoid failure reason code, got %+v", stored)
+	}
+	repliesReq := httptest.NewRequest(http.MethodGet, "/demo/replies", nil)
+	repliesResp := httptest.NewRecorder()
+	app.ServeHTTP(repliesResp, repliesReq)
+	if !strings.Contains(repliesResp.Body.String(), "openai compat says hi") {
+		t.Fatalf("expected openai compat reply to be recorded, got %s", repliesResp.Body.String())
+	}
+	if rendered := app.tracer.RenderTrace(stored.TraceID); !strings.Contains(rendered, "reply.send") {
+		t.Fatalf("expected reply.send span on openai compat success trace, got %s", rendered)
+	}
+	console := readRuntimeConsoleResponse(t, app)
+	if got := consoleMetaString(t, console.Meta, "ai_chat_provider"); got != "openai_compat" {
+		t.Fatalf("expected console ai_chat_provider=openai_compat, got %q", got)
+	}
+	secretReads := 0
+	for _, entry := range app.audits.AuditEntries() {
+		if entry.Action == "secret.read" && entry.Target == apiKeyRef && entry.Allowed {
+			secretReads++
+		}
+	}
+	if secretReads != 1 {
+		t.Fatalf("expected one successful ai api key secret audit, got %+v", app.audits.AuditEntries())
+	}
+	matchedProviderLog := false
+	for _, line := range app.logs.Lines() {
+		if strings.Contains(line, "runtime ai provider configured") && strings.Contains(line, `"provider":"openai_compat"`) && strings.Contains(line, `"model":"gpt-test"`) {
+			matchedProviderLog = true
+			break
+		}
+	}
+	if !matchedProviderLog {
+		t.Fatalf("expected provider configuration log, got %+v", app.logs.Lines())
+	}
+}
+
+func TestRuntimeAppAIMessageOpenAICompatRejectsRedirectBeforeFollowing(t *testing.T) {
+	apiKeyRef := "BOT_PLATFORM_AI_CHAT_API_KEY_TEST_REDIRECT"
+	t.Setenv(apiKeyRef, "secret-openai-key")
+
+	redirectTargetHits := 0
+	redirectTargetSawAuthorization := false
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectTargetHits++
+		if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+			redirectTargetSawAuthorization = true
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"redirect target should not be reached"}}]}`))
+	}))
+	defer redirectTarget.Close()
+
+	redirectSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirectSource.Close()
+
+	app, err := newRuntimeApp(writeAIProviderConfigAt(t, t.TempDir(), redirectSource.URL, "gpt-redirect", 500, apiKeyRef))
+	if err != nil {
+		t.Fatalf("new runtime app with redirecting openai compat provider: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(`{"prompt":"follow redirect please","user_id":"user-ai-openai-redirect"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	jobID := extractAIJobID(resp.Body.String())
+	stored := waitForAIJobStatus(t, app, jobID, runtimecore.JobStatusDead)
+	if redirectTargetHits != 0 {
+		t.Fatalf("expected redirected target never to be hit, hits=%d authorization=%v", redirectTargetHits, redirectTargetSawAuthorization)
+	}
+	if redirectTargetSawAuthorization {
+		t.Fatal("expected redirected target never to receive authorization header")
+	}
+	if !strings.Contains(strings.ToLower(stored.LastError), "redirects are not allowed") {
+		t.Fatalf("expected redirect rejection detail on job, got %+v", stored)
+	}
+
+	repliesReq := httptest.NewRequest(http.MethodGet, "/demo/replies", nil)
+	repliesResp := httptest.NewRecorder()
+	app.ServeHTTP(repliesResp, repliesReq)
+	if !strings.Contains(strings.ToLower(repliesResp.Body.String()), "redirects are not allowed") {
+		t.Fatalf("expected redirect rejection failure feedback reply, got %s", repliesResp.Body.String())
+	}
+
+	matchedRedirectLog := false
+	for _, line := range app.logs.Lines() {
+		if strings.Contains(line, "runtime ai provider request failed") && strings.Contains(strings.ToLower(line), "redirects are not allowed") {
+			matchedRedirectLog = true
+			break
+		}
+	}
+	if !matchedRedirectLog {
+		t.Fatalf("expected redirect rejection provider log, got %+v", app.logs.Lines())
+	}
+}
+
 func TestRuntimeAppAIQueueDispatcherUsesRuntimeDispatchPath(t *testing.T) {
 	t.Parallel()
 
@@ -3044,6 +3366,125 @@ func TestRuntimeAppAIMessageFailureFeedback(t *testing.T) {
 		time.Sleep(80 * time.Millisecond)
 	}
 	t.Fatal("expected AI failure feedback to be recorded")
+}
+
+func TestRuntimeAppAIMessageOpenAICompatFailureUsesExistingDeadLetterPath(t *testing.T) {
+	apiKeyRef := "BOT_PLATFORM_AI_CHAT_API_KEY_TEST_FAILURE"
+	t.Setenv(apiKeyRef, "secret-openai-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream overloaded", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	app, err := newRuntimeApp(writeAIProviderConfigAt(t, t.TempDir(), server.URL, "gpt-fail", 500, apiKeyRef))
+	if err != nil {
+		t.Fatalf("new runtime app with failing openai compat provider: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(`{"prompt":"please fail for real provider","user_id":"user-ai-openai-fail"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	jobID := extractAIJobID(resp.Body.String())
+	stored := waitForAIJobStatus(t, app, jobID, runtimecore.JobStatusDead)
+	if !stored.DeadLetter || stored.ReasonCode != runtimecore.JobReasonCodeExecutionDead {
+		t.Fatalf("expected execution dead-letter semantics for provider failure, got %+v", stored)
+	}
+	if !strings.Contains(stored.LastError, "status 502") || !strings.Contains(stored.LastError, "upstream overloaded") {
+		t.Fatalf("expected provider failure detail on job, got %+v", stored)
+	}
+	repliesReq := httptest.NewRequest(http.MethodGet, "/demo/replies", nil)
+	repliesResp := httptest.NewRecorder()
+	app.ServeHTTP(repliesResp, repliesReq)
+	if !strings.Contains(repliesResp.Body.String(), "AI request failed: openai_compat request failed: status 502: upstream overloaded") {
+		t.Fatalf("expected dead-letter failure feedback reply, got %s", repliesResp.Body.String())
+	}
+	matchedDispatchLog := false
+	matchedProviderErrorLog := false
+	for _, line := range app.logs.Lines() {
+		if strings.Contains(line, "runtime queued job dispatch failed") && strings.Contains(line, jobID) && strings.Contains(line, "status 502") {
+			matchedDispatchLog = true
+		}
+		if strings.Contains(line, "runtime ai provider returned non-success response") && strings.Contains(line, `"status_code":502`) {
+			matchedProviderErrorLog = true
+		}
+	}
+	if !matchedDispatchLog {
+		t.Fatalf("expected queued dispatch failure log for provider error, got %+v", app.logs.Lines())
+	}
+	if !matchedProviderErrorLog {
+		t.Fatalf("expected provider error log for non-2xx response, got %+v", app.logs.Lines())
+	}
+	alerts, err := app.state.ListAlerts(t.Context())
+	if err != nil {
+		t.Fatalf("load alerts after provider dead letter: %v", err)
+	}
+	foundDeadLetterAlert := false
+	for _, alert := range alerts {
+		if alert.ObjectID == jobID && alert.FailureType == "job.dead_letter" && strings.Contains(alert.LatestReason, "status 502") {
+			foundDeadLetterAlert = true
+			break
+		}
+	}
+	if !foundDeadLetterAlert {
+		t.Fatalf("expected dead-letter alert for provider failure, got %+v", alerts)
+	}
+	if rendered := app.tracer.RenderTrace(stored.TraceID); !strings.Contains(rendered, "reply.send") {
+		t.Fatalf("expected reply.send span on provider dead-letter trace, got %s", rendered)
+	}
+}
+
+func TestRuntimeAppAIMessageOpenAICompatTimeoutUsesExistingDeadLetterPath(t *testing.T) {
+	apiKeyRef := "BOT_PLATFORM_AI_CHAT_API_KEY_TEST_TIMEOUT"
+	t.Setenv(apiKeyRef, "secret-openai-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"too slow"}}]}`))
+	}))
+	defer server.Close()
+
+	app, err := newRuntimeApp(writeAIProviderConfigAt(t, t.TempDir(), server.URL, "gpt-timeout", 50, apiKeyRef))
+	if err != nil {
+		t.Fatalf("new runtime app with timeout openai compat provider: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	req := httptest.NewRequest(http.MethodPost, "/demo/ai/message", strings.NewReader(`{"prompt":"timeout please","user_id":"user-ai-openai-timeout"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	jobID := extractAIJobID(resp.Body.String())
+	stored := waitForAIJobStatus(t, app, jobID, runtimecore.JobStatusDead)
+	if !stored.DeadLetter || stored.ReasonCode != runtimecore.JobReasonCodeExecutionDead {
+		t.Fatalf("expected timeout path to dead-letter through existing execution semantics, got %+v", stored)
+	}
+	if !strings.Contains(strings.ToLower(stored.LastError), "context deadline exceeded") {
+		t.Fatalf("expected timeout detail on job, got %+v", stored)
+	}
+	repliesReq := httptest.NewRequest(http.MethodGet, "/demo/replies", nil)
+	repliesResp := httptest.NewRecorder()
+	app.ServeHTTP(repliesResp, repliesReq)
+	if !strings.Contains(strings.ToLower(repliesResp.Body.String()), "context deadline exceeded") {
+		t.Fatalf("expected timeout failure feedback reply, got %s", repliesResp.Body.String())
+	}
+	matchedProviderTimeoutLog := false
+	for _, line := range app.logs.Lines() {
+		if strings.Contains(line, "runtime ai provider request failed") && strings.Contains(strings.ToLower(line), "context deadline exceeded") {
+			matchedProviderTimeoutLog = true
+			break
+		}
+	}
+	if !matchedProviderTimeoutLog {
+		t.Fatalf("expected provider timeout log, got %+v", app.logs.Lines())
+	}
 }
 
 func TestRuntimeAppRestoresPersistedJobsAfterRestart(t *testing.T) {

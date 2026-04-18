@@ -14,10 +14,6 @@
 
 ## Backlog
 
-### A6. 真实 provider / 外部服务集成
-- 当前 AI provider 仍是 demo/mock 风格路径。
-- 需要补真实 provider 接入、配置、故障与可观测链路，而不只是内部演示能力。
-
 ### A7. 更强的鉴权与操作者身份模型
 - 当前 RBAC 已有真实边界，但仍偏 runtime-local。
 - 需要继续补 console/authn、资源模型、策略持久化/热更新等更完整能力。

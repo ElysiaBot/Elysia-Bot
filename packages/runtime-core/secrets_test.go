@@ -93,6 +93,7 @@ func TestSecretPolicyDeclaresCurrentRuntimeBoundaries(t *testing.T) {
 	t.Parallel()
 
 	policy := SecretPolicy()
+	aiContract := AIChatAPIKeySecretContract()
 	if policy.Provider != "env" {
 		t.Fatalf("expected env provider, got %q", policy.Provider)
 	}
@@ -102,14 +103,20 @@ func TestSecretPolicyDeclaresCurrentRuntimeBoundaries(t *testing.T) {
 	if !policy.RuntimeOwned {
 		t.Fatal("expected runtime-owned secret refs")
 	}
-	if len(policy.ConfigRefs) != 1 || policy.ConfigRefs[0] != "secrets.webhook_token_ref" {
+	if len(policy.ConfigRefs) != 2 || policy.ConfigRefs[0] != "secrets.webhook_token_ref" || policy.ConfigRefs[1] != aiContract.ConfigRef {
 		t.Fatalf("expected webhook config ref declaration, got %+v", policy.ConfigRefs)
 	}
-	if len(policy.ActiveConsumers) != 1 || policy.ActiveConsumers[0] != "adapter-webhook" {
-		t.Fatalf("expected adapter-webhook as the only active consumer, got %+v", policy.ActiveConsumers)
+	if len(policy.ActiveConsumers) != 2 || policy.ActiveConsumers[0] != "adapter-webhook" || policy.ActiveConsumers[1] != "apps/runtime" {
+		t.Fatalf("expected adapter-webhook and apps/runtime as active consumers, got %+v", policy.ActiveConsumers)
+	}
+	if len(policy.AdditionalContracts) != 1 || policy.AdditionalContracts[0] != aiContract {
+		t.Fatalf("expected ai chat secret contract declaration, got %+v", policy.AdditionalContracts)
 	}
 	if !containsSecretPolicyString(policy.IntegrationPoints, "adapter-webhook.NewWithSecretRef") {
 		t.Fatalf("expected NewWithSecretRef integration point, got %+v", policy.IntegrationPoints)
+	}
+	if !containsSecretPolicyString(policy.IntegrationPoints, aiContract.Consumer) {
+		t.Fatalf("expected ai chat integration point %q, got %+v", aiContract.Consumer, policy.IntegrationPoints)
 	}
 	if policy.AuditAction != "secret.read" {
 		t.Fatalf("expected secret.read audit action, got %q", policy.AuditAction)
@@ -129,7 +136,7 @@ func TestSecretPolicyDeclaresCurrentRuntimeBoundaries(t *testing.T) {
 			t.Fatalf("expected verification endpoint %q, got %+v", expected, policy.VerificationEndpoints)
 		}
 	}
-	for _, expected := range []string{"BOT_PLATFORM_*", "EnvSecretProvider", "secrets.webhook_token_ref", "SecretRegistry.Resolve", "generic secret resolution failures"} {
+	for _, expected := range []string{"BOT_PLATFORM_*", "EnvSecretProvider", "secrets.webhook_token_ref", aiContract.ConfigRef, "SecretRegistry.Resolve", aiContract.Consumer, "generic secret resolution failures"} {
 		if !strings.Contains(policy.Summary+" "+strings.Join(policy.Facts, " "), expected) {
 			t.Fatalf("expected declaration to mention %q, got summary=%q facts=%+v", expected, policy.Summary, policy.Facts)
 		}

@@ -72,6 +72,7 @@ func TestDevelopmentConfigWebhookSecretMainPathContractStaysAligned(t *testing.T
 	t.Parallel()
 
 	contract := WebhookSecretMainPathContract()
+	aiContract := AIChatAPIKeySecretContract()
 	configPath := filepath.Join("..", "..", "deploy", "config.dev.yaml")
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -85,14 +86,76 @@ func TestDevelopmentConfigWebhookSecretMainPathContractStaysAligned(t *testing.T
 	if policy.MainPathContract != contract {
 		t.Fatalf("expected secret policy main path contract %+v, got %+v", contract, policy.MainPathContract)
 	}
-	if len(policy.ConfigRefs) != 1 || policy.ConfigRefs[0] != contract.ConfigRef {
+	if len(policy.ConfigRefs) != 2 || policy.ConfigRefs[0] != contract.ConfigRef || policy.ConfigRefs[1] != aiContract.ConfigRef {
 		t.Fatalf("expected secret policy config ref %q, got %+v", contract.ConfigRef, policy.ConfigRefs)
 	}
-	if len(policy.IntegrationPoints) != 2 || policy.IntegrationPoints[0] != contract.ConfigRef || policy.IntegrationPoints[1] != contract.Consumer {
-		t.Fatalf("expected secret policy integration points [%q %q], got %+v", contract.ConfigRef, contract.Consumer, policy.IntegrationPoints)
+	if len(policy.AdditionalContracts) != 1 || policy.AdditionalContracts[0] != aiContract {
+		t.Fatalf("expected ai-chat secret policy additional contract %+v, got %+v", aiContract, policy.AdditionalContracts)
 	}
-	if !strings.Contains(strings.Join(policy.Facts, " "), contract.PathNote) {
-		t.Fatalf("expected secret policy facts to include path note %q, got %+v", contract.PathNote, policy.Facts)
+	if len(policy.IntegrationPoints) != 4 || policy.IntegrationPoints[0] != contract.ConfigRef || policy.IntegrationPoints[1] != contract.Consumer || policy.IntegrationPoints[2] != aiContract.ConfigRef || policy.IntegrationPoints[3] != aiContract.Consumer {
+		t.Fatalf("expected secret policy integration points [%q %q %q %q], got %+v", contract.ConfigRef, contract.Consumer, aiContract.ConfigRef, aiContract.Consumer, policy.IntegrationPoints)
+	}
+	if !strings.Contains(strings.Join(policy.Facts, " "), contract.PathNote) || !strings.Contains(strings.Join(policy.Facts, " "), aiContract.PathNote) {
+		t.Fatalf("expected secret policy facts to include path notes %q and %q, got %+v", contract.PathNote, aiContract.PathNote, policy.Facts)
+	}
+}
+
+func TestLoadConfigRejectsInvalidAIChatSecretRef(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("runtime:\n  environment: development\n  log_level: debug\n  http_port: 8080\nai_chat:\n  provider: openai_compat\n  endpoint: https://example.invalid/v1/chat/completions\n  model: test-model\nsecrets:\n  ai_chat_api_key_ref: ai.chat.key\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadConfig(path)
+	expectedErr := "invalid " + AIChatAPIKeySecretConfigRef() + ": secret ref must use BOT_PLATFORM_ prefix"
+	if err == nil || err.Error() != expectedErr {
+		t.Fatalf("expected invalid ai chat secret ref config error, got %v", err)
+	}
+}
+
+func TestLoadConfigRejectsInsecureNonLoopbackOpenAICompatEndpoint(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("runtime:\n  environment: development\n  log_level: debug\n  http_port: 8080\nai_chat:\n  provider: openai_compat\n  endpoint: http://example.invalid/v1/chat/completions\n  model: test-model\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "ai_chat.endpoint must use https unless it targets localhost or loopback") {
+		t.Fatalf("expected insecure non-loopback openai endpoint rejection, got %v", err)
+	}
+}
+
+func TestLoadConfigAllowsLoopbackHTTPForOpenAICompatEndpoint(t *testing.T) {
+	t.Parallel()
+
+	for _, endpoint := range []string{
+		"http://localhost:11434/v1/chat/completions",
+		"http://127.0.0.1:8081/v1/chat/completions",
+		"http://[::1]:8082/v1/chat/completions",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			raw := []byte("runtime:\n  environment: development\n  log_level: debug\n  http_port: 8080\nai_chat:\n  provider: openai_compat\n  endpoint: " + endpoint + "\n  model: test-model\nsecrets:\n  ai_chat_api_key_ref: BOT_PLATFORM_AI_CHAT_API_KEY\n")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("expected loopback openai endpoint to pass validation, got %v", err)
+			}
+			if cfg.AIChat.Endpoint != endpoint || cfg.AIChat.Provider != "openai_compat" {
+				t.Fatalf("unexpected ai config %+v", cfg.AIChat)
+			}
+		})
 	}
 }
 
@@ -106,6 +169,22 @@ func TestDevelopmentTemplateIsReadable(t *testing.T) {
 	}
 	if len(raw) == 0 {
 		t.Fatal("expected config template to be non-empty")
+	}
+}
+
+func TestDevelopmentConfigIncludesOptionalOpenAICompatEntryPath(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join("..", "..", "deploy", "config.dev.yaml")
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.AIChat.Provider != "mock" || cfg.AIChat.Endpoint != "https://api.openai.com/v1/chat/completions" || cfg.AIChat.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected development config to include optional real-provider ai chat entry while defaulting to mock, got %+v", cfg.AIChat)
+	}
+	if cfg.Secrets.AIChatAPIKeyRef != "BOT_PLATFORM_AI_CHAT_API_KEY" {
+		t.Fatalf("expected development config ai chat secret ref hook, got %+v", cfg.Secrets)
 	}
 }
 

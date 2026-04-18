@@ -88,6 +88,8 @@ npm run dev:runtime
 - `GET /demo/replies`
 - `GET /demo/state/counts`
 
+`deploy/config.dev.yaml` 默认仍使用 `ai_chat.provider: mock` 方便本地直接启动，但已经同时包含最小真实 provider 入口：把 `ai_chat.provider` 切到 `openai_compat`、保留 `secrets.ai_chat_api_key_ref`，并提供一个 `https://` endpoint（本地开发/测试只对 `localhost` / loopback 保留 `http://` 例外）。
+
 ## 常用命令
 
 ```bash
@@ -127,5 +129,5 @@ npm run test:postgres:smoke
 - SQLite 仍是当前主要运行态存储；Postgres 只进入较小的 smoke/store 路径。
 - Console Web 仍是读面优先的控制台，不是完整产品化控制面。
 - 插件系统已具备真实运行与恢复/排障基础，但还不是成熟第三方插件生态。
-- AI 链路当前是 demo / mock 风格 provider 路径，不应按完整生产 provider 集成来理解。
+- AI 链路当前已经支持一条收口后的真实 provider 路径：`ai_chat.provider=openai_compat` + runtime-owned `secrets.ai_chat_api_key_ref`，但这仍只是单一的窄集成面，不应按完整 provider 平台、多供应商框架或生产级密钥管理系统来理解。
 - 后续未完成事项统一放在 `docs/TODO.md`，README 不再承担开发任务清单角色。
