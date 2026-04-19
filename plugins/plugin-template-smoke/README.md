@@ -1,19 +1,23 @@
 # plugin-template-smoke
 
-`plugin-template-smoke` 是当前仓库为新插件开发者保留的最小复制入口。
+`plugin-template-smoke` 是当前仓库为新插件开发者保留的最小 repo-local 插件模板。
 
-它不是脚手架 CLI，也不是完整第三方插件 SDK；它只负责把当前真实边界收口成一条可复制、可注册、可运行、可测试的 smoke 路径。
+它现在配合 `packages/plugin-sdk/cmd/plugin-dev` 作为当前仓库内的最小脚手架 / manifest 生成 / 本地打包入口，而不是继续依赖手工复制后再手工维护 `manifest.json`。
 
 ## 最小复制入口
 
-建议从以下四个文件开始复制：
+当前不再推荐手工复制目录。优先走 repo-local 脚手架：
 
-- `plugin.go`
-- `plugin_test.go`
-- `template_test.go`
-- `manifest.json`
+```bash
+npm run plugin:scaffold -- -id plugin-example
+```
 
-如果你要在当前 monorepo 内新建插件目录，还需要同步调整 [`go.mod`](plugins/plugin-template-smoke/go.mod)。
+这条命令会：
+
+- 从 `plugins/plugin-template-smoke` 生成新的 repo 内插件目录
+- 按新插件 ID / 名称重写 `plugin.go`、测试与 `go.mod`
+- 自动把新插件路径写进 [`go.work`](go.work)
+- 生成初始 `manifest.json`
 
 ## 复制后优先改哪些常量
 
@@ -24,9 +28,9 @@
 - `TemplatePluginModule`
 - `TemplatePluginSymbol`
 
-这样可以让 [`New()`](plugins/plugin-template-smoke/plugin.go)、[`Definition()`](plugins/plugin-template-smoke/plugin.go) 暴露的 manifest，以及 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go) 对静态 `manifest.json` 的关键 developer-entry 字段校验保持同步。
+这样可以让 [`Manifest()`](plugins/plugin-template-smoke/plugin.go) 继续作为源码真值，并让 [`New()`](plugins/plugin-template-smoke/plugin.go)、[`Definition()`](plugins/plugin-template-smoke/plugin.go) 与 [`manifest_test.go`](plugins/plugin-template-smoke/manifest_test.go) 对生成产物的校验保持同步。
 
-当前模板里的代码 manifest 与静态 `manifest.json` 也都会展示一个最小 `publish` 元数据块，用来声明发布来源与 runtime 兼容范围。
+当前模板里的 `Manifest()` 与生成出来的 `manifest.json` 都会展示一个最小 `publish` 元数据块，用来声明发布来源与 runtime 兼容范围。
 
 当前最小插件自有状态路径，也先只支持像 `plugin-echo` 这样把**持久化配置**作为 plugin-owned input/state seed 暴露到 `/api/console` 读模型；它应与 runtime/operator-owned enabled overlay、以及 runtime-owned status snapshot 明确区分，而不是把它们混成一个通用插件状态系统。
 
@@ -34,10 +38,24 @@
 
 最小创建与验证路径是：
 
-1. 复制 `plugins/plugin-template-smoke` 到新的插件目录。
-2. 修改 [`plugin.go`](plugins/plugin-template-smoke/plugin.go)、[`manifest.json`](plugins/plugin-template-smoke/manifest.json)、[`go.mod`](plugins/plugin-template-smoke/go.mod) 与测试文件中的插件标识。
-3. 把新模块接入 [`go.work`](go.work)；如果要被 [`tests/e2e`](tests/e2e) 直接 import，再补 [`tests/e2e/go.mod`](tests/e2e/go.mod) 的 `require/replace`。
-4. 运行插件单测与 e2e smoke，确认 runtime 注册与事件分发链路仍成立。
+1. 运行 `npm run plugin:scaffold -- -id plugin-example` 生成新的 repo-local 插件目录。
+2. 修改 [`plugin.go`](plugins/plugin-template-smoke/plugin.go) 里的业务逻辑与 `Manifest()`。
+3. 运行 `npm run plugin:manifest:write -- -plugin ./plugins/plugin-example` 刷新 `manifest.json`。
+4. 运行 `go test ./plugins/plugin-example`；如果要把新插件接入 runtime 或 `tests/e2e` 直接 import，再按实际需要补注册 / `go.mod` wiring。
+
+`manifest.json` 不再是手工真值来源；它现在是 `Manifest()` 的生成物。
+
+## manifest / package 命令
+
+```bash
+npm run plugin:manifest:write -- -plugin ./plugins/plugin-template-smoke
+npm run plugin:manifest:check -- -plugin ./plugins/plugin-template-smoke
+npm run plugin:package -- -plugin ./plugins/plugin-template-smoke
+```
+
+- `manifest write`：把 `Manifest()` 生成到当前插件目录下的 `manifest.json`
+- `manifest check`：校验已提交的 `manifest.json` 仍与 `Manifest()` 一致
+- `package`：生成一个轻量 repo-local `dist/` 目录，包含生成后的 `manifest.json` 与最小 companion artifact（当前是 `README.md`）
 
 ## 聚焦验证命令
 
@@ -49,7 +67,7 @@ npm run test:plugin-template:smoke
 
 这条命令覆盖：
 
-- 静态 `manifest.json` 是否仍与 `plugin.go` / `Definition().Manifest` 的关键 developer-entry 字段一致
+- `Manifest()` 生成的 `manifest.json` 是否仍与仓库内已提交产物一致
 - 事件型插件最小回复路径
 - 缺失 reply handle 的坏输入
 - reply service 错误冒泡
@@ -58,5 +76,5 @@ npm run test:plugin-template:smoke
 ## 已知限制
 
 - 当前模板只覆盖 `OnEvent(...)` 事件型插件入口，不直接生成 `OnJob(...)`、`OnSchedule(...)`、`OnCommand(...)` 多入口样板。
-- [`manifest.json`](plugins/plugin-template-smoke/manifest.json) 仍是独立静态文件；当前由 [`TestTemplateManifestConstantsStayInSync()`](plugins/plugin-template-smoke/template_test.go) 把 [`plugin.go`](plugins/plugin-template-smoke/plugin.go) / `Definition().Manifest` 作为关键 developer-entry 字段的真值来源，但这不是新的 CLI、脚手架或完整逐字段生成器。
+- 当前脚手架只覆盖 repo 内插件目录生成、manifest 生成/check 与轻量本地 `dist/` 输出；它不是插件市场，也不是远程发布服务。
 - 当前 smoke 使用 [`DirectPluginHost`](packages/runtime-core/runtime.go:899) 做进程内验证，证明的是 runtime 注册与 dispatch 合约，不是完整 subprocess host 生命周期。

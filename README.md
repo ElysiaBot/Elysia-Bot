@@ -100,6 +100,10 @@ npm run format
 npm run dev
 npm run dev:runtime
 npm run dev:runtime:check-config
+npm run plugin:scaffold -- -id plugin-example
+npm run plugin:manifest:write -- -plugin ./plugins/plugin-template-smoke
+npm run plugin:manifest:check -- -plugin ./plugins/plugin-template-smoke
+npm run plugin:package -- -plugin ./plugins/plugin-template-smoke
 npm run test:plugin-template:smoke
 npm run test:postgres:smoke
 ```
@@ -109,6 +113,10 @@ npm run test:postgres:smoke
 - `npm run dev`：启动 `apps/console-web`
 - `npm run dev:runtime`：启动 Go runtime
 - `npm run dev:runtime:check-config`：只做 runtime 配置预检，不启动 HTTP server
+- `npm run plugin:scaffold -- -id plugin-example`：从 `plugin-template-smoke` 生成新的 repo-local 插件目录，并自动更新 `go.work`
+- `npm run plugin:manifest:write -- -plugin <dir>`：把插件源码里的 `Manifest()` 写成 `manifest.json`
+- `npm run plugin:manifest:check -- -plugin <dir>`：校验 `manifest.json` 没有偏离源码真值
+- `npm run plugin:package -- -plugin <dir>`：输出轻量 repo-local `dist/` 打包产物（当前包含生成 manifest 与 README）
 - `npm run test`：运行当前纳入工作区的 Go 测试集合
 - `npm run test:plugin-template:smoke`：运行插件模板开发路径的聚焦 smoke 验证
 - `npm run test:postgres:smoke`：运行受环境变量控制的 Postgres live smoke 测试
@@ -118,9 +126,10 @@ npm run test:postgres:smoke
 当前最小插件开发入口已经收口到：
 
 - `plugins/plugin-template-smoke/README.md`
+- `packages/plugin-sdk/cmd/plugin-dev`
 - `npm run test:plugin-template:smoke`
 
-这条路径适用于仓库内“复制 -> 改名 -> 注册 -> smoke”的最小插件开发流。它不是完整脚手架系统，也不是开放插件市场。
+这条路径适用于仓库内“脚手架 -> 改 `Manifest()`/逻辑 -> 生成 manifest -> smoke”的最小插件开发流。它不是完整脚手架系统，也不是开放插件市场。
 
 ## 当前范围边界
 
