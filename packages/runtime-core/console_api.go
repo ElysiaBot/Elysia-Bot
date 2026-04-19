@@ -50,6 +50,7 @@ type ConsolePlugin struct {
 	Mode                     string                `json:"mode"`
 	Permissions              []string              `json:"permissions"`
 	ConfigSchema             map[string]any        `json:"configSchema,omitempty"`
+	Config                   map[string]any        `json:"config,omitempty"`
 	Entry                    pluginsdk.PluginEntry `json:"entry"`
 	Publish                  *ConsolePluginPublish `json:"publish,omitempty"`
 	Enabled                  bool                  `json:"enabled"`
@@ -78,7 +79,8 @@ type ConsolePlugin struct {
 }
 
 type ConsolePluginConfigBinding struct {
-	StateKind string
+	StateKind     string
+	ProjectConfig func(raw json.RawMessage) (map[string]any, error)
 }
 
 type ConsoleAdapterInstance struct {
@@ -631,10 +633,31 @@ func applyPluginConfigState(item *ConsolePlugin, binding ConsolePluginConfigBind
 	item.ConfigStateKind = stateKind
 	item.ConfigSource = "sqlite-plugin-config"
 	item.ConfigPersisted = true
+	if config := projectConsolePluginConfig(binding, state); len(config) > 0 {
+		item.Config = config
+	}
 	if !state.UpdatedAt.IsZero() {
 		updatedAt := state.UpdatedAt.UTC()
 		item.ConfigUpdatedAt = &updatedAt
 	}
+}
+
+func projectConsolePluginConfig(binding ConsolePluginConfigBinding, state PluginConfigState) map[string]any {
+	if len(state.RawConfig) == 0 || string(state.RawConfig) == "null" {
+		return nil
+	}
+	if binding.ProjectConfig != nil {
+		config, err := binding.ProjectConfig(state.RawConfig)
+		if err != nil {
+			return nil
+		}
+		return cloneAnyMap(config)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(state.RawConfig, &config); err != nil {
+		return nil
+	}
+	return cloneAnyMap(config)
 }
 
 func applyPluginStatusSnapshot(item *ConsolePlugin, snapshot PluginStatusSnapshot) {

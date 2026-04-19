@@ -1422,7 +1422,7 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), `"plugin_read_model": "runtime-registry+sqlite-plugin-status-snapshot"`) {
 		t.Fatalf("expected console payload to include plugin_read_model=runtime-registry+sqlite-plugin-status-snapshot, got %s", resp.Body.String())
 	}
-	for _, expected := range []string{`"plugin_config_state_read_model": "runtime-registry+sqlite-plugin-config"`, `"plugin_config_state_kind": "plugin-owned-persisted-input"`, `"plugin_config_state_persisted": true`, `"plugin_config_operator_actions": [`, `"plugin_config_operator_scope": "plugins with app-local persisted config bindings only"`, `"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"workflow_read_model": "sqlite-workflow-instances"`, `"workflow_status_source": "sqlite-workflow-instances"`, `"workflow_status_persisted": true`, `"workflow_runtime_owner": "runtime-core"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"/demo/plugins/{plugin-id}/config"`, `"/demo/schedules/{schedule-id}/cancel"`, `"console_mode": "read+operator-plugin-enable-disable+plugin-config"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`, `"configStateKind": "plugin-owned-persisted-input"`, `"configPersisted": false`} {
+	for _, expected := range []string{`"plugin_config_state_read_model": "runtime-registry+sqlite-plugin-config"`, `"plugin_config_state_kind": "plugin-owned-persisted-input"`, `"plugin_config_state_persisted": true`, `"plugin_config_operator_actions": [`, `"plugin_config_operator_scope": "plugins with app-local persisted config bindings only"`, `"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"workflow_read_model": "sqlite-workflow-instances"`, `"workflow_status_source": "sqlite-workflow-instances"`, `"workflow_status_persisted": true`, `"workflow_runtime_owner": "runtime-core"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"/demo/plugins/{plugin-id}/config"`, `"/demo/jobs/{job-id}/retry"`, `"/demo/schedules/{schedule-id}/cancel"`, `"job_operator_scope": "dead-letter jobs only"`, `"console_mode": "read+operator-plugin-enable-disable+plugin-config+job-retry+schedule-cancel"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`, `"configStateKind": "plugin-owned-persisted-input"`, `"configPersisted": false`} {
 		if !strings.Contains(resp.Body.String(), expected) {
 			t.Fatalf("expected console payload to include %s, got %s", expected, resp.Body.String())
 		}
@@ -1443,7 +1443,7 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 		"/demo/replies",
 		"/demo/state/counts",
 	}
-	if got := consoleMetaString(t, console.Meta, "console_mode"); got != "read+operator-plugin-enable-disable+plugin-config" {
+	if got := consoleMetaString(t, console.Meta, "console_mode"); got != "read+operator-plugin-enable-disable+plugin-config+job-retry+schedule-cancel" {
 		t.Fatalf("expected console_mode to advertise plugin-config capability, got %q", got)
 	}
 	if got := consoleMetaString(t, console.Meta, "plugin_config_operator_scope"); got != "plugins with app-local persisted config bindings only" {
@@ -1451,6 +1451,12 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	}
 	if got := consoleMetaStringSlice(t, console.Meta, "plugin_config_operator_actions"); !reflect.DeepEqual(got, []string{"/demo/plugins/{plugin-id}/config"}) {
 		t.Fatalf("expected exact plugin_config_operator_actions, got %+v", got)
+	}
+	if got := consoleMetaStringSlice(t, console.Meta, "job_operator_actions"); !reflect.DeepEqual(got, []string{"/demo/jobs/{job-id}/retry"}) {
+		t.Fatalf("expected exact job_operator_actions, got %+v", got)
+	}
+	if got := consoleMetaString(t, console.Meta, "job_operator_scope"); got != "dead-letter jobs only" {
+		t.Fatalf("expected job_operator_scope to describe retry capability, got %q", got)
 	}
 	if got := consoleMetaStringSlice(t, console.Meta, "demo_paths"); !reflect.DeepEqual(got, expectedDemoPaths) {
 		t.Fatalf("expected exact demo_paths, got %+v", got)

@@ -69,7 +69,17 @@ func (r appPluginConfigRegistry) Lookup(pluginID string) (appPluginConfigBinding
 func (r appPluginConfigRegistry) ConsoleBindings() map[string]runtimecore.ConsolePluginConfigBinding {
 	bindings := make(map[string]runtimecore.ConsolePluginConfigBinding, len(r))
 	for pluginID, binding := range r {
-		bindings[pluginID] = runtimecore.ConsolePluginConfigBinding{StateKind: binding.ConfigStateKind}
+		bindingCopy := binding
+		bindings[pluginID] = runtimecore.ConsolePluginConfigBinding{
+			StateKind: binding.ConfigStateKind,
+			ProjectConfig: func(raw json.RawMessage) (map[string]any, error) {
+				decoded, err := bindingCopy.Decode(raw)
+				if err != nil {
+					return nil, err
+				}
+				return decoded.ResponseConfig, nil
+			},
+		}
 	}
 	return bindings
 }

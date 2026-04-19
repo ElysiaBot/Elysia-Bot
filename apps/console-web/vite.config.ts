@@ -11,5 +11,11 @@ export default defineConfig({
   },
   server: {
     port: 4173,
+    proxy: {
+      '/api': 'http://127.0.0.1:8080',
+      '/demo': 'http://127.0.0.1:8080',
+      '/metrics': 'http://127.0.0.1:8080',
+      '/healthz': 'http://127.0.0.1:8080',
+    },
   },
 });

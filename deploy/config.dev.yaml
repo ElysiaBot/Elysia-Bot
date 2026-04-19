@@ -24,9 +24,30 @@ secrets:
   ai_chat_api_key_ref: BOT_PLATFORM_AI_CHAT_API_KEY # required when ai_chat.provider=openai_compat
 
 rbac:
+  console_read_permission: console:read
   actor_roles:
-    admin-user: [admin]
+    admin-user: [admin, console-viewer]
+    config-operator: [plugin-config-operator, console-viewer]
+    job-operator: [job-operator, console-viewer]
+    runtime-job-runner: [runtime-job-runner]
+    schedule-admin: [schedule-operator, console-viewer]
+    viewer-user: [console-viewer]
   policies:
+    console-viewer:
+      permissions: [console:read]
+      plugin_scope: ["console"]
     admin:
       permissions: [plugin:enable, plugin:disable, plugin:rollout]
+      plugin_scope: ["*"]
+    plugin-config-operator:
+      permissions: [plugin:config]
+      plugin_scope: ["plugin-echo"]
+    job-operator:
+      permissions: [job:retry]
+      plugin_scope: ["*"]
+    runtime-job-runner:
+      permissions: [job:run]
+      plugin_scope: ["plugin-ai-chat"]
+    schedule-operator:
+      permissions: [schedule:cancel]
       plugin_scope: ["*"]

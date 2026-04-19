@@ -391,6 +391,9 @@ func TestConsoleAPIExposesPersistedPluginConfigStateForPluginEcho(t *testing.T) 
 	if plugin.ConfigStateKind != "plugin-owned-persisted-input" || plugin.ConfigSource != "sqlite-plugin-config" || !plugin.ConfigPersisted {
 		t.Fatalf("expected persisted plugin config state metadata in console payload, got %+v", plugin)
 	}
+	if plugin.Config["prefix"] != "persisted: " {
+		t.Fatalf("expected projected persisted plugin config value in console payload, got %+v", plugin.Config)
+	}
 	if plugin.ConfigUpdatedAt == nil {
 		t.Fatalf("expected config updated timestamp to be present, got %+v", plugin)
 	}
@@ -398,7 +401,7 @@ func TestConsoleAPIExposesPersistedPluginConfigStateForPluginEcho(t *testing.T) 
 	if err != nil {
 		t.Fatalf("render json: %v", err)
 	}
-	for _, expected := range []string{`"configStateKind": "plugin-owned-persisted-input"`, `"configSource": "sqlite-plugin-config"`, `"configPersisted": true`, `"configUpdatedAt":`} {
+	for _, expected := range []string{`"configStateKind": "plugin-owned-persisted-input"`, `"configSource": "sqlite-plugin-config"`, `"configPersisted": true`, `"config": {`, `"prefix": "persisted: "`, `"configUpdatedAt":`} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected rendered console payload to contain %q, got %s", expected, rendered)
 		}

@@ -1,205 +1,65 @@
 import { describe, expect, it } from 'vitest';
+import { cloneMockConsoleData } from './mock-console-data';
 import { parseConsolePayload } from './consolePayload';
 
-const basePlugin = {
-  id: 'plugin-echo',
-  name: 'Echo Plugin',
-  version: '0.1.0',
-  apiVersion: 'v0',
-  mode: 'subprocess',
-  permissions: ['message:read'],
-  publish: {
-    sourceType: 'git',
-    sourceUri: 'https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo',
-    runtimeVersionRange: '>=0.1.0 <1.0.0',
-  },
-  entry: { module: 'plugins/plugin-echo' },
-};
-
-const baseAdapter = {
-  id: 'adapter-onebot-demo',
-  adapter: 'onebot',
-  source: 'onebot',
-  status: 'registered',
-  health: 'ready',
-  online: true,
-  statePersisted: true,
-};
-
-const basePayload = {
-  status: { adapters: 1, plugins: 1, jobs: 1, schedules: 1 },
-  adapters: [baseAdapter],
-  plugins: [basePlugin],
-  jobs: [
-    {
-      id: 'job-console',
-      type: 'ai.call',
-      status: 'pending',
-      retryCount: 0,
-      maxRetries: 1,
-      timeout: 30_000_000_000,
-      lastError: '',
-      createdAt: '2026-04-06T00:00:00Z',
-      deadLetter: false,
-      correlation: 'corr-console',
-    },
-  ],
-  schedules: [
-    {
-      id: 'schedule-console',
-      kind: 'delay',
-      source: 'runtime-demo-scheduler',
-      eventType: 'message.received',
-      cronExpr: '',
-      delayMs: 30_000,
-      executeAt: null,
-      dueAt: '2026-04-06T00:00:30Z',
-      createdAt: '2026-04-06T00:00:00Z',
-      updatedAt: '2026-04-06T00:00:00Z',
-    },
-  ],
-  logs: ['runtime started'],
-  config: {
-    Runtime: {
-      Environment: 'development',
-      LogLevel: 'debug',
-      HTTPPort: 8080,
-    },
-  },
-  meta: {
-    runtime_entry: 'apps/runtime',
-    demo_paths: ['/demo/onebot/message'],
-    sqlite_path: 'data/dev/runtime.sqlite',
-    scheduler_interval_ms: 100,
-    console_mode: 'read-only',
-  },
-  observability: {
-    jobDispatchReady: 1,
-    scheduleDueReady: 0,
-  },
-};
-
 describe('parseConsolePayload', () => {
-  it('accepts adapter updatedAt when it is a string timestamp', () => {
-    const parsed = parseConsolePayload({
-      ...basePayload,
-      adapters: [{ ...baseAdapter, updatedAt: '2026-04-05T23:59:00Z' }],
-    });
+  it('accepts the expanded A11 console payload with routes, operator meta, and evidence sections', () => {
+    const payload = cloneMockConsoleData();
 
-    expect(parsed.adapters[0]?.updatedAt).toBe('2026-04-05T23:59:00Z');
+    const parsed = parseConsolePayload(payload);
+
+    expect(parsed.meta.console_mode).toBe('read+operator-plugin-enable-disable+plugin-config+job-retry+schedule-cancel');
+    expect(parsed.meta.job_operator_actions).toEqual(['/demo/jobs/{job-id}/retry']);
+    expect(parsed.meta.schedule_operator_actions).toEqual(['/demo/schedules/{schedule-id}/cancel']);
+    expect(parsed.meta.rbac_console_read_actor_header).toBe('X-Bot-Platform-Actor');
+    expect(parsed.plugins[0]?.config).toEqual({ prefix: 'persisted: ' });
+    expect(parsed.alerts[0]?.objectId).toBe('job-dead-letter-console');
+    expect(parsed.workflows[0]?.status).toBe('waiting_event');
+    expect(parsed.audits[0]?.occurred_at).toBe('2026-04-19T11:43:00Z');
+    expect(parsed.recovery.totalSchedules).toBe(1);
   });
 
-  it('rejects adapter updatedAt when it is not a string', () => {
-    expect(() =>
-      parseConsolePayload({
-        ...basePayload,
-        adapters: [{ ...baseAdapter, updatedAt: 123 }],
-      }),
-    ).toThrow('Console API payload shape is incompatible with Console Web v0');
+  it('rejects payloads when plugin config is not an object', () => {
+    const payload = cloneMockConsoleData();
+    payload.plugins[0] = { ...payload.plugins[0], config: 'persisted: ' as never };
+
+    expect(() => parseConsolePayload(payload)).toThrow('Console API payload shape is incompatible with Console Web A11');
   });
 
-  it('accepts plugin lastDispatchAt when it is a string timestamp', () => {
-    const parsed = parseConsolePayload({
-      ...basePayload,
-      plugins: [{
-        ...basePlugin,
-        configStateKind: 'plugin-owned-persisted-input',
-        configSource: 'sqlite-plugin-config',
-        configPersisted: true,
-        configUpdatedAt: '2026-04-05T23:57:00Z',
-        enabled: true,
-        enabledStateSource: 'runtime-default-enabled',
-        enabledStatePersisted: false,
-        lastDispatchAt: '2026-04-05T23:59:00Z',
-      }],
-    });
+  it('accepts runtime jobs that omit payload when there is no payload data', () => {
+    const payload = cloneMockConsoleData();
+    delete (payload.jobs[1] as Record<string, unknown>).payload;
 
-    expect(parsed.plugins[0]?.lastDispatchAt).toBe('2026-04-05T23:59:00Z');
+    const parsed = parseConsolePayload(payload);
+
+    expect(parsed.jobs[1]?.payload).toEqual({});
   });
 
-  it('keeps plugin lastDispatchAt optional when it is missing', () => {
-    const parsed = parseConsolePayload(basePayload);
+  it('rejects jobs when payload is present but not an object', () => {
+    const payload = cloneMockConsoleData();
+    payload.jobs[1] = { ...payload.jobs[1], payload: 'not-an-object' as never };
 
-    expect(parsed.plugins[0]?.lastDispatchAt).toBeUndefined();
+    expect(() => parseConsolePayload(payload)).toThrow('Console API payload shape is incompatible with Console Web A11');
   });
 
-  it('accepts plugin publish metadata when the existing manifest publish block is present', () => {
-    const parsed = parseConsolePayload(basePayload);
+  it('rejects payloads when meta job operator actions are not string arrays', () => {
+    const payload = cloneMockConsoleData();
+    payload.meta.job_operator_actions = [123 as never];
 
-    expect(parsed.plugins[0]?.publish).toEqual({
-      sourceType: 'git',
-      sourceUri: 'https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo',
-      runtimeVersionRange: '>=0.1.0 <1.0.0',
-    });
+    expect(() => parseConsolePayload(payload)).toThrow('Console API payload shape is incompatible with Console Web A11');
   });
 
-  it('keeps plugin publish metadata optional when it is missing', () => {
-    const parsed = parseConsolePayload({
-      ...basePayload,
-      plugins: [{ ...basePlugin, publish: undefined }],
-    });
+  it('rejects payloads when workflows do not include persisted state flags', () => {
+    const payload = cloneMockConsoleData();
+    payload.workflows[0] = { ...payload.workflows[0], statePersisted: undefined as never };
 
-    expect(parsed.plugins[0]?.publish).toBeUndefined();
+    expect(() => parseConsolePayload(payload)).toThrow('Console API payload shape is incompatible with Console Web A11');
   });
 
-  it('rejects plugin publish metadata when runtimeVersionRange is not a string', () => {
-    expect(() =>
-      parseConsolePayload({
-        ...basePayload,
-        plugins: [{
-          ...basePlugin,
-          publish: {
-            sourceType: 'git',
-            sourceUri: 'https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo',
-            runtimeVersionRange: 123,
-          },
-        }],
-      }),
-    ).toThrow('Console API payload shape is incompatible with Console Web v0');
+  it('rejects payloads when audits no longer use the runtime occurred_at field', () => {
+    const payload = cloneMockConsoleData();
+    payload.audits[0] = { ...payload.audits[0], occurred_at: 123 as never };
+
+    expect(() => parseConsolePayload(payload)).toThrow('Console API payload shape is incompatible with Console Web A11');
   });
-
-  it('rejects plugin lastDispatchAt when it is not a string', () => {
-    expect(() =>
-      parseConsolePayload({
-        ...basePayload,
-        plugins: [{ ...basePlugin, lastDispatchAt: 123 }],
-      }),
-    ).toThrow('Console API payload shape is incompatible with Console Web v0');
-  });
-
-	it('accepts plugin persisted config contract fields when they use the expected types', () => {
-	  const parsed = parseConsolePayload({
-	    ...basePayload,
-	    plugins: [{
-	      ...basePlugin,
-	      configStateKind: 'plugin-owned-persisted-input',
-	      configSource: 'sqlite-plugin-config',
-	      configPersisted: true,
-	      configUpdatedAt: '2026-04-05T23:57:00Z',
-	      enabled: true,
-	      enabledStateSource: 'runtime-default-enabled',
-	      enabledStatePersisted: false,
-	      enabledStateUpdatedAt: '2026-04-05T23:58:00Z',
-	    }],
-	  });
-
-	  expect(parsed.plugins[0]?.configStateKind).toBe('plugin-owned-persisted-input');
-	  expect(parsed.plugins[0]?.configPersisted).toBe(true);
-	  expect(parsed.plugins[0]?.enabledStateSource).toBe('runtime-default-enabled');
-	});
-
-	it('rejects plugin persisted config contract fields when configUpdatedAt is not a string', () => {
-	  expect(() =>
-	    parseConsolePayload({
-	      ...basePayload,
-	      plugins: [{
-	        ...basePlugin,
-	        configStateKind: 'plugin-owned-persisted-input',
-	        configSource: 'sqlite-plugin-config',
-	        configPersisted: true,
-	        configUpdatedAt: 123,
-	      }],
-	    }),
-	  ).toThrow('Console API payload shape is incompatible with Console Web v0');
-	});
 });

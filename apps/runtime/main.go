@@ -776,7 +776,7 @@ func newRuntimeAppWithOutput(configPath string, output io.Writer) (*runtimeApp, 
 			"ai_job_dispatcher":       "runtime-job-queue",
 			"ai_chat_provider":        config.AIChat.Provider,
 			"runtime_worker_id":       runtimeWorkerID(),
-			"console_mode":            "read+operator-plugin-enable-disable+plugin-config",
+			"console_mode":            "read+operator-plugin-enable-disable+plugin-config+job-retry+schedule-cancel",
 		},
 		mux: http.NewServeMux(),
 	}
@@ -1022,6 +1022,8 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["job_recovery_reason"] = "running jobs are retried or dead-lettered after restart"
 	meta["job_recovery_recovered_jobs"] = recovery.RecoveredJobs
 	meta["job_recovery_total_jobs"] = recovery.TotalJobs
+	meta["job_operator_actions"] = []string{"/demo/jobs/{job-id}/retry"}
+	meta["job_operator_scope"] = "dead-letter jobs only"
 	meta["schedule_read_model"] = "sqlite"
 	meta["schedule_status_source"] = "sqlite-schedule-plans"
 	meta["schedule_status_persisted"] = true

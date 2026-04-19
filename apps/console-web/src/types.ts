@@ -37,16 +37,17 @@ export type PluginManifest = {
   name: string;
   version: string;
   apiVersion: string;
-  mode: 'inproc' | 'subprocess' | 'remote';
+  mode: string;
   permissions: string[];
   configSchema?: Record<string, unknown>;
+  config?: Record<string, unknown>;
   entry: PluginEntry;
   publish?: PluginPublish;
   configStateKind?: string;
   configSource?: string;
   configPersisted?: boolean;
   configUpdatedAt?: string;
-  enabled?: boolean;
+  enabled: boolean;
   enabledStateSource?: string;
   enabledStatePersisted?: boolean;
   enabledStateUpdatedAt?: string;
@@ -67,7 +68,21 @@ export type PluginManifest = {
   statusStaleness?: string;
 };
 
-export type JobStatus = 'pending' | 'running' | 'retrying' | 'failed' | 'dead' | 'done';
+export type JobStatus = 'pending' | 'running' | 'retrying' | 'cancelled' | 'failed' | 'dead' | 'done';
+
+export type ConsoleRBACDeclaration = {
+  actor?: string;
+  permission?: string;
+  targetPluginId?: string;
+  dispatchKind?: string;
+  runtimeAuthorizerEnabled: boolean;
+  runtimeAuthorizerScope?: string;
+  manifestGateEnabled: boolean;
+  manifestGateScope?: string;
+  jobTargetFilterEnabled: boolean;
+  facts?: string[];
+  summary?: string;
+};
 
 export type Job = {
   id: string;
@@ -85,10 +100,31 @@ export type Job = {
   startedAt: string | null;
   finishedAt: string | null;
   nextRunAt: string | null;
+  workerId?: string;
+  leaseAcquiredAt?: string | null;
+  leaseExpiresAt?: string | null;
+  heartbeatAt?: string | null;
+  reasonCode?: string;
   deadLetter: boolean;
   correlation: string;
+  targetPluginId?: string;
+  dispatchMetadataPresent?: boolean;
+  dispatchContractPresent?: boolean;
+  queueContractComplete?: boolean;
   dispatchReady?: boolean;
   queueStateSummary?: string;
+  dispatchSummary?: string;
+  queueContractSummary?: string;
+  leaseSummary?: string;
+  dispatchPermission?: string;
+  dispatchActor?: string;
+  dispatchRbac?: ConsoleRBACDeclaration;
+  replyHandlePresent?: boolean;
+  replyHandleCapability?: string;
+  replyContractPresent?: boolean;
+  replySummary?: string;
+  sessionIDPresent?: boolean;
+  replyTargetPresent?: boolean;
   recoverySummary?: string;
 };
 
@@ -103,11 +139,120 @@ export type Schedule = {
   delayMs: number;
   executeAt: string | null;
   dueAt: string | null;
+  dueAtSource?: string;
+  dueAtEvidence?: string;
+  dueAtPersisted?: boolean;
   dueReady?: boolean;
+  overdue?: boolean;
+  claimOwner?: string;
+  claimedAt?: string | null;
+  claimed?: boolean;
+  recoveryState?: string;
   dueStateSummary?: string;
+  dueSummary?: string;
   scheduleSummary?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type Workflow = {
+  id: string;
+  pluginId: string;
+  status: string;
+  currentIndex: number;
+  waitingFor?: string;
+  sleepingUntil?: string | null;
+  completed: boolean;
+  compensated: boolean;
+  state?: Record<string, unknown>;
+  lastEventId?: string;
+  lastEventType?: string;
+  statusSource?: string;
+  statePersisted: boolean;
+  runtimeOwner?: string;
+  createdAt: string;
+  updatedAt: string;
+  summary?: string;
+};
+
+export type AlertRecord = {
+  id: string;
+  objectType: string;
+  objectId: string;
+  failureType: string;
+  firstOccurredAt: string;
+  latestOccurredAt: string;
+  latestReason: string;
+  traceId?: string;
+  eventId?: string;
+  runId?: string;
+  correlation?: string;
+  createdAt: string;
+};
+
+export type AuditEntry = {
+  actor: string;
+  permission?: string;
+  action: string;
+  target: string;
+  allowed: boolean;
+  reason?: string;
+  occurred_at: string;
+};
+
+export type ReplayOperation = {
+  replayId: string;
+  sourceEventId: string;
+  replayEventId: string;
+  status: string;
+  reason?: string;
+  occurredAt?: string;
+  updatedAt?: string;
+  stateSource?: string;
+  persisted: boolean;
+  summary?: string;
+};
+
+export type RolloutOperation = {
+  operationId: string;
+  pluginId: string;
+  action: string;
+  currentVersion?: string;
+  candidateVersion?: string;
+  status: string;
+  reason?: string;
+  occurredAt?: string;
+  updatedAt?: string;
+  stateSource?: string;
+  persisted: boolean;
+  summary?: string;
+};
+
+export type ConsoleRecovery = {
+  recoveredAt?: string;
+  totalJobs: number;
+  recoveredJobs: number;
+  recoveredRunning: number;
+  retriedJobs: number;
+  deadJobs: number;
+  statusCounts?: Record<string, number>;
+  totalSchedules: number;
+  recoveredSchedules: number;
+  invalidSchedules: number;
+  scheduleKinds?: Record<string, number>;
+  summary?: string;
+};
+
+export type ConsoleAuthorizationPolicy = {
+  permissions: string[];
+  pluginScope?: string[];
+  eventScope?: string[];
+};
+
+export type ConsoleRBACConfig = {
+  ActorRoles: Record<string, string[]>;
+  Policies: Record<string, ConsoleAuthorizationPolicy>;
+  ConsoleReadPermission?: string;
 };
 
 export type ConsoleConfig = {
@@ -116,6 +261,17 @@ export type ConsoleConfig = {
     LogLevel: string;
     HTTPPort: number;
   };
+  AIChat?: {
+    Provider?: string;
+    Endpoint?: string;
+    Model?: string;
+    RequestTimeoutMs?: number;
+  };
+  Secrets?: {
+    WebhookTokenRef?: string;
+    AIChatAPIKeyRef?: string;
+  };
+  RBAC?: ConsoleRBACConfig;
 };
 
 export type ConsoleMeta = {
@@ -126,6 +282,20 @@ export type ConsoleMeta = {
   ai_worker_enabled?: boolean;
   ai_job_dispatcher_registered?: boolean;
   console_mode: string;
+  generated_at?: string;
+  plugin_operator_actions?: string[];
+  plugin_operator_scope?: string;
+  plugin_config_operator_actions?: string[];
+  plugin_config_operator_scope?: string;
+  job_operator_actions?: string[];
+  job_operator_scope?: string;
+  schedule_operator_actions?: string[];
+  schedule_operator_scope?: string;
+  rbac_console_read_actor_header?: string;
+  rbac_console_read_permission?: boolean;
+  rbac_console_limitations?: string[];
+  verification_endpoints?: string[];
+  [key: string]: unknown;
 };
 
 export type ConsoleObservability = {
@@ -143,11 +313,32 @@ export type ConsoleObservability = {
 export type ConsolePayload = {
   status: RuntimeStatus;
   adapters: AdapterInstance[];
+  alerts: AlertRecord[];
+  replayOps: ReplayOperation[];
+  rolloutOps: RolloutOperation[];
   plugins: PluginManifest[];
   jobs: Job[];
   schedules: Schedule[];
+  workflows: Workflow[];
   logs: string[];
+  audits: AuditEntry[];
   config: ConsoleConfig;
   meta: ConsoleMeta;
+  recovery: ConsoleRecovery;
   observability: ConsoleObservability;
+};
+
+export type ConsoleFilters = {
+  logQuery: string;
+  jobQuery: string;
+  pluginID: string;
+};
+
+export type OperatorActionResult = {
+  status?: string;
+  action?: string;
+  target?: string;
+  accepted?: boolean;
+  reason?: string;
+  [key: string]: unknown;
 };
