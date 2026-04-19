@@ -8,17 +8,17 @@
     "reply:send"
   ],
   "configSchema": {
-    "type": "object",
     "properties": {
       "prefix": {
         "type": "string"
       }
-    }
+    },
+    "type": "object"
   },
   "publish": {
     "sourceType": "git",
     "sourceUri": "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-template-smoke",
-    "runtimeVersionRange": ">=0.1.0 <1.0.0"
+    "runtimeVersionRange": "\u003e=0.1.0 \u003c1.0.0"
   },
   "entry": {
     "module": "plugins/plugin-template-smoke",

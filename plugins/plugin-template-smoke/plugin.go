@@ -1,7 +1,6 @@
 package plugintemplatesmoke
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -14,16 +13,10 @@ const (
 	TemplatePluginName                = "Plugin Template Smoke"
 	TemplatePluginModule              = "plugins/plugin-template-smoke"
 	TemplatePluginSymbol              = "Plugin"
-	TemplatePluginPublishSourceType   = "git"
+	TemplatePluginPublishSourceType   = pluginsdk.PublishSourceTypeGit
 	TemplatePluginPublishSourceURI    = "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-template-smoke"
 	TemplatePluginRuntimeVersionRange = ">=0.1.0 <1.0.0"
 )
-
-type manifestPublishMetadata struct {
-	SourceType          string `json:"sourceType"`
-	SourceURI           string `json:"sourceUri"`
-	RuntimeVersionRange string `json:"runtimeVersionRange"`
-}
 
 type Config struct {
 	Prefix string `json:"prefix"`
@@ -36,7 +29,15 @@ type Plugin struct {
 }
 
 func New(replyService pluginsdk.ReplyService, config Config) Plugin {
-	manifest := pluginsdk.PluginManifest{
+	return Plugin{
+		Manifest:     Manifest(),
+		Config:       config,
+		ReplyService: replyService,
+	}
+}
+
+func Manifest() pluginsdk.PluginManifest {
+	return pluginsdk.PluginManifest{
 		ID:         TemplatePluginID,
 		Name:       TemplatePluginName,
 		Version:    "0.1.0",
@@ -51,35 +52,13 @@ func New(replyService pluginsdk.ReplyService, config Config) Plugin {
 				"prefix": map[string]any{"type": "string"},
 			},
 		},
-		Entry: pluginsdk.PluginEntry{Module: TemplatePluginModule, Symbol: TemplatePluginSymbol},
-	}
-
-	return Plugin{
-		Manifest:     withPublishMetadata(manifest),
-		Config:       config,
-		ReplyService: replyService,
-	}
-}
-
-func withPublishMetadata(manifest pluginsdk.PluginManifest) pluginsdk.PluginManifest {
-	rawManifest, err := json.Marshal(struct {
-		pluginsdk.PluginManifest
-		Publish manifestPublishMetadata `json:"publish"`
-	}{
-		PluginManifest: manifest,
-		Publish: manifestPublishMetadata{
+		Publish: &pluginsdk.PluginPublish{
 			SourceType:          TemplatePluginPublishSourceType,
 			SourceURI:           TemplatePluginPublishSourceURI,
 			RuntimeVersionRange: TemplatePluginRuntimeVersionRange,
 		},
-	})
-	if err != nil {
-		panic(fmt.Sprintf("marshal template publish metadata: %v", err))
+		Entry: pluginsdk.PluginEntry{Module: TemplatePluginModule, Symbol: TemplatePluginSymbol},
 	}
-	if err := json.Unmarshal(rawManifest, &manifest); err != nil {
-		panic(fmt.Sprintf("unmarshal template publish metadata: %v", err))
-	}
-	return manifest
 }
 
 func (p Plugin) Definition() pluginsdk.Plugin {
