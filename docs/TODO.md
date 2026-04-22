@@ -3,24 +3,75 @@
 ## 使用规则
 - 只保留仍未完成、且已经能从当前代码中明确看出的事项。
 - 按“最影响当前平台真实边界”的顺序排序。
-- 每项都尽量写成可以继续切 slice 的主题，而不是历史复盘。
+- 每项都尽量写成可以继续切 slice 的收口主题，而不是历史复盘或宽泛愿景。
 - 已完成事项直接从本文件删除，不做归档。
+- 本页只记录当前主链收口事项。远期方向仅在 Not now 保留边界提示，不作为当前承诺。
 
 ---
 
 ## Active
 
+### 1. 把 Postgres 提升为正式生产路径
+- 把现有 store / schema / smoke path 扩成正式 storage contract 与 migration 路径。
+- 覆盖 restore / replay / job / schedule / workflow / audit / plugin state 的 Postgres 存储语义，而不是只做最小 smoke。
+- 保留 SQLite 作为开发与本地 profile 路径，不再让它承担默认生产假设。
+- 补齐迁移、备份、恢复演练与兼容性验证，确保状态恢复链路真实可用。
+- 验收：在 Postgres 下跑通 e2e、replay、workflow restore、operator write path，不再依赖 smoke-only 验证。
+
+### 2. 把认证与 operator identity 收口成真实身份链路
+- 控制台与所有写路径不再依赖裸 `X-Bot-Platform-Actor` 作为主身份输入。
+- 引入 token / JWT / SSO 中至少一种正式身份入口，并让 actor identity 与 session / audit 记录绑定。
+- 统一 RBAC deny、operator write record、审计事件格式，避免不同写入口各自留痕。
+- 在继续保持“读面优先”前提下，为 console / console API 建立最小 authn / authz 基线。
+- 验收：所有 operator 写路径都能追溯到真实身份，且有一致的鉴权与审计记录。
+
+### 3. 收口插件契约、兼容性校验与发布回退基础
+- 为 manifest 建立版本化 schema 与 `runtimeVersionRange` 兼容矩阵，防止 host / runtime 演进时插件静默漂移。
+- 把 plugin template smoke 扩到 host mode / ABI / manifest drift / config schema drift 组合验证。
+- 为官方插件建立 inproc / subprocess 双模式兼容验证，但默认产品路径仍以 subprocess 为主。
+- 把 rollout 从 `prepare` / `activate` 扩到至少支持 candidate / canary / activate / rollback 所需的快照与状态基础。
+- 验收：官方插件在 CI 中可验证兼容性；发布失败时能回退到最近稳定版本且保留 manifest / config snapshot。
+
 ---
 
 ## Backlog
 
+### 1. 补齐队列与 workflow 的可靠编排语义
+- 为 job 增加 backoff、cancel、pause 等运行语义，避免只有“能跑”没有“可控”。
+- 让 workflow 收口 `call_job`、result resume、persist_state、compensation、replay boundary 的整链路语义。
+- 补一条“事件触发 → workflow 等待 → job 调用 → 挂起恢复 → 补偿”的参考演示路径。
+
+### 2. 扩充 e2e、fault injection 与 host/storage 组合验证
+- 覆盖插件崩溃、数据库断连、外部 API 429、重复事件、消息乱序、adapter 重连等关键失败场景。
+- 覆盖 SQLite / Postgres 与 inproc / subprocess 的关键组合 smoke，避免主路径切换时出现盲区。
+- 建立 nightly fault-injection、Postgres smoke、plugin matrix 级别的持续验证。
+
+### 3. 整理主路径文档与工程治理文档
+- 恢复 `docs/roadmap` / ADR / feature maturity 说明，明确哪些能力是默认主路径、哪些只是骨架。
+- 把“先收口再扩张”的当前阶段判断写清楚，避免 README、TODO、实现状态继续漂移。
+- 以“内核年 / 生态年 / 平台年”组织长期层次，但不要把远期蓝图写成当前承诺。
+
+### 4. 继续打磨插件开发最小闭环
+- 收口 scaffold → manifest → package → smoke 的 repo-local 插件开发流，减少模板与真实路径脱节。
+- 增补官方参考插件与插件开发手册，但目标是验证 runtime 语义，不是提前扩张插件市场。
+- 补权限声明、配置 schema、观测、发布约束等开发约定文档。
+
+### 5. 在读面优先前提下补有限控制面写路径
+- 在认证与审计收口后，再扩 plugin config、schedule、dead-letter、rollout 等最小写入口。
+- 保持 `console-web` 不是完整产品化控制面，避免 UI 范围再次跑到 runtime 收口前面。
+- 先补详情与状态可见性，再考虑批量操作和更强交互。
+
 ---
 
 ## Not now
-- 统一 transport/client failure taxonomy 大扩张
-- retry / reconnect / backoff 全系统化改造
+- remote plugin runtime / remote host 正式产品化
+- 多节点或分布式执行
 - 完整插件市场
 - 多租户
-- 分布式执行
 - 完整控制台产品化
+- 低代码 / 可视化 workflow 编排
+- 广泛平台扩张（超出当前 OneBot + Webhook 主线）
+- 兼容现有外部插件生态
+- 跨全系统的大一统 failure taxonomy 扩张
+- 超出当前主链所需范围的全局 retry / reconnect / backoff 统一化
 - 提前为远期生态做大抽象
