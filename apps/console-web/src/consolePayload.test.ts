@@ -15,7 +15,13 @@ describe('parseConsolePayload', () => {
     expect(parsed.plugins[0]?.config).toEqual({ prefix: 'persisted: ' });
     expect(parsed.alerts[0]?.objectId).toBe('job-dead-letter-console');
     expect(parsed.workflows[0]?.status).toBe('waiting_event');
+    expect(parsed.workflows[0]?.traceId).toBe('trace-workflow-console');
+    expect(parsed.workflows[0]?.eventId).toBe('evt-workflow-console-origin');
+    expect(parsed.workflows[0]?.runId).toBe('run-workflow-console');
+    expect(parsed.workflows[0]?.correlationId).toBe('corr-workflow-console');
     expect(parsed.audits[0]?.occurred_at).toBe('2026-04-19T11:43:00Z');
+    expect(parsed.audits[0]?.trace_id).toBe('trace-console-audit-plugin-disable');
+    expect(parsed.audits[0]?.error_code).toBe('plugin_disabled');
     expect(parsed.recovery.totalSchedules).toBe(1);
   });
 

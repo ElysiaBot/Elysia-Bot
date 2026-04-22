@@ -202,6 +202,10 @@ function hasWorkflowShape(value: unknown): boolean {
   return (
     isString(value.id) &&
     isString(value.pluginId) &&
+    (value.traceId === undefined || isString(value.traceId)) &&
+    (value.eventId === undefined || isString(value.eventId)) &&
+    (value.runId === undefined || isString(value.runId)) &&
+    (value.correlationId === undefined || isString(value.correlationId)) &&
     isString(value.status) &&
     isNumber(value.currentIndex) &&
     (value.waitingFor === undefined || isString(value.waitingFor)) &&
@@ -251,6 +255,13 @@ function hasAuditShape(value: unknown): boolean {
     isString(value.target) &&
     isBoolean(value.allowed) &&
     (value.reason === undefined || isString(value.reason)) &&
+    (value.trace_id === undefined || isString(value.trace_id)) &&
+    (value.event_id === undefined || isString(value.event_id)) &&
+    (value.plugin_id === undefined || isString(value.plugin_id)) &&
+    (value.run_id === undefined || isString(value.run_id)) &&
+    (value.correlation_id === undefined || isString(value.correlation_id)) &&
+    (value.error_category === undefined || isString(value.error_category)) &&
+    (value.error_code === undefined || isString(value.error_code)) &&
     isString(value.occurred_at)
   );
 }

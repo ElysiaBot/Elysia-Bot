@@ -55,6 +55,7 @@ describe('App', () => {
     expect(screen.getByText('Recovery and alert evidence')).toBeInTheDocument();
     expect(screen.getAllByText('job-dead-letter-console').length).toBeGreaterThan(0);
     expect(screen.getByText('workflow-user-1')).toBeInTheDocument();
+    expect(screen.getByText(/category operator · code plugin_disabled/i)).toBeInTheDocument();
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -226,6 +227,23 @@ describe('App', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     const finalRequest = fetchMock.mock.calls[3]?.[0] as URL;
     expect(finalRequest.pathname).toBe('/api/console');
+  });
+
+  it('shows workflow observability ids on the routed workflow detail page', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createFetchResponse(consolePayload));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Local operator console' });
+
+    fireEvent.click(screen.getByLabelText('Open workflow workflow-user-1 details'));
+    await screen.findByRole('heading', { name: 'workflow-user-1 · plugin-workflow-demo' });
+
+    expect(screen.getByText('trace-workflow-console')).toBeInTheDocument();
+    expect(screen.getByText('evt-workflow-console-origin')).toBeInTheDocument();
+    expect(screen.getByText('run-workflow-console')).toBeInTheDocument();
+    expect(screen.getByText('corr-workflow-console')).toBeInTheDocument();
+    expect(screen.getAllByText('message.received')).toHaveLength(2);
   });
 
   it('toggles auto refresh preference and performs an explicit manual refresh', async () => {

@@ -283,6 +283,10 @@ type ConsoleSchedule struct {
 type ConsoleWorkflow struct {
 	ID             string         `json:"id"`
 	PluginID       string         `json:"pluginId"`
+	TraceID        string         `json:"traceId,omitempty"`
+	EventID        string         `json:"eventId,omitempty"`
+	RunID          string         `json:"runId,omitempty"`
+	CorrelationID  string         `json:"correlationId,omitempty"`
 	Status         string         `json:"status"`
 	CurrentIndex   int            `json:"currentIndex"`
 	WaitingFor     string         `json:"waitingFor,omitempty"`
@@ -1304,6 +1308,10 @@ func toConsoleWorkflow(instance WorkflowInstanceState) ConsoleWorkflow {
 	item := ConsoleWorkflow{
 		ID:             instance.WorkflowID,
 		PluginID:       instance.PluginID,
+		TraceID:        instance.TraceID,
+		EventID:        instance.EventID,
+		RunID:          instance.RunID,
+		CorrelationID:  instance.CorrelationID,
 		Status:         string(instance.Status),
 		CurrentIndex:   instance.Workflow.CurrentIndex,
 		WaitingFor:     instance.Workflow.WaitingFor,

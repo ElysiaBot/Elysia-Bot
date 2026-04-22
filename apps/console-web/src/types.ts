@@ -158,6 +158,10 @@ export type Schedule = {
 export type Workflow = {
   id: string;
   pluginId: string;
+  traceId?: string;
+  eventId?: string;
+  runId?: string;
+  correlationId?: string;
   status: string;
   currentIndex: number;
   waitingFor?: string;
@@ -197,6 +201,13 @@ export type AuditEntry = {
   target: string;
   allowed: boolean;
   reason?: string;
+  trace_id?: string;
+  event_id?: string;
+  plugin_id?: string;
+  run_id?: string;
+  correlation_id?: string;
+  error_category?: string;
+  error_code?: string;
   occurred_at: string;
 };
 

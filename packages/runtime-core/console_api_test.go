@@ -366,6 +366,10 @@ func TestConsoleAPIExposesPersistedWorkflowInstances(t *testing.T) {
 	if err := store.SaveWorkflowInstance(context.Background(), WorkflowInstanceState{
 		WorkflowID:    `workflow-user-1`,
 		PluginID:      `plugin-workflow-demo`,
+		TraceID:       `trace-workflow-console`,
+		EventID:       `evt-workflow-console-origin`,
+		RunID:         `run-workflow-console`,
+		CorrelationID: `corr-workflow-console`,
 		Status:        WorkflowRuntimeStatusWaitingEvent,
 		Workflow:      workflow,
 		LastEventID:   `evt-1`,
@@ -389,6 +393,9 @@ func TestConsoleAPIExposesPersistedWorkflowInstances(t *testing.T) {
 	if workflowItem.ID != `workflow-user-1` || workflowItem.PluginID != `plugin-workflow-demo` || workflowItem.Status != string(WorkflowRuntimeStatusWaitingEvent) {
 		t.Fatalf(`expected persisted workflow identity/status in console payload, got %+v`, workflowItem)
 	}
+	if workflowItem.TraceID != `trace-workflow-console` || workflowItem.EventID != `evt-workflow-console-origin` || workflowItem.RunID != `run-workflow-console` || workflowItem.CorrelationID != `corr-workflow-console` {
+		t.Fatalf(`expected workflow observability ids in console payload, got %+v`, workflowItem)
+	}
 	if !workflowItem.StatePersisted || workflowItem.StatusSource != `sqlite-workflow-instances` || workflowItem.RuntimeOwner != `runtime-core` {
 		t.Fatalf(`expected workflow console provenance metadata, got %+v`, workflowItem)
 	}
@@ -399,7 +406,7 @@ func TestConsoleAPIExposesPersistedWorkflowInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf(`render console json: %v`, err)
 	}
-	for _, expected := range []string{`"workflows": [`, `"id": "workflow-user-1"`, `"pluginId": "plugin-workflow-demo"`, `"status": "waiting_event"`, `"statusSource": "sqlite-workflow-instances"`, `"runtimeOwner": "runtime-core"`} {
+	for _, expected := range []string{`"workflows": [`, `"id": "workflow-user-1"`, `"pluginId": "plugin-workflow-demo"`, `"traceId": "trace-workflow-console"`, `"eventId": "evt-workflow-console-origin"`, `"runId": "run-workflow-console"`, `"correlationId": "corr-workflow-console"`, `"status": "waiting_event"`, `"statusSource": "sqlite-workflow-instances"`, `"runtimeOwner": "runtime-core"`} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf(`expected rendered console payload to contain %q, got %s`, expected, rendered)
 		}

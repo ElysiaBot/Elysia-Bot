@@ -159,6 +159,19 @@ function formatStringList(items: string[] | undefined): string {
   return items.join(', ');
 }
 
+function formatAuditObservability(entry: AuditEntry): string {
+  const parts = [
+    entry.trace_id ? `trace ${entry.trace_id}` : '',
+    entry.event_id ? `event ${entry.event_id}` : '',
+    entry.plugin_id ? `plugin ${entry.plugin_id}` : '',
+    entry.run_id ? `run ${entry.run_id}` : '',
+    entry.correlation_id ? `correlation ${entry.correlation_id}` : '',
+    entry.error_category ? `category ${entry.error_category}` : '',
+    entry.error_code ? `code ${entry.error_code}` : '',
+  ].filter((part) => part !== '');
+  return parts.join(' · ');
+}
+
 function getPluginAttentionState(plugin: PluginManifest): 'failing' | 'recovered' | 'normal' {
   if ((plugin.currentFailureStreak ?? 0) > 0) {
     return 'failing';
@@ -754,6 +767,7 @@ function App() {
                     </div>
                     <p>{entry.target}</p>
                     <span className="list-meta">{entry.actor || 'header omitted'} · {entry.permission ?? 'no permission field'} · {formatTimestamp(entry.occurred_at)}</span>
+                    {formatAuditObservability(entry) ? <span className="list-meta">{formatAuditObservability(entry)}</span> : null}
                   </article>
                 ))}
               </div>
@@ -918,6 +932,7 @@ function App() {
                       </div>
                       <p>{entry.reason ?? 'no audit reason'}</p>
                       <span className="list-meta">{entry.actor || 'header omitted'} · {entry.permission ?? 'no permission'} · {formatTimestamp(entry.occurred_at)}</span>
+                      {formatAuditObservability(entry) ? <span className="list-meta">{formatAuditObservability(entry)}</span> : null}
                     </article>
                   ))}
                 </div>
@@ -1100,6 +1115,7 @@ function App() {
                       </div>
                       <p>{entry.reason ?? 'no reason'}</p>
                       <span className="list-meta">{entry.actor || 'header omitted'} · {formatTimestamp(entry.occurred_at)}</span>
+                      {formatAuditObservability(entry) ? <span className="list-meta">{formatAuditObservability(entry)}</span> : null}
                     </article>
                   ))}
                 </div>
@@ -1245,6 +1261,7 @@ function App() {
                       </div>
                       <p>{entry.reason ?? 'no reason'}</p>
                       <span className="list-meta">{entry.actor || 'header omitted'} · {formatTimestamp(entry.occurred_at)}</span>
+                      {formatAuditObservability(entry) ? <span className="list-meta">{formatAuditObservability(entry)}</span> : null}
                     </article>
                   ))}
                 </div>
@@ -1382,7 +1399,17 @@ function App() {
         return <EmptyState title="Workflow not found" description="The current runtime snapshot does not include this workflow ID." />;
       }
 
-      const workflowLogs = relatedLogs(payload.logs, workflow.id, workflow.pluginId, workflow.lastEventId, filters.logQuery);
+      const workflowLogs = relatedLogs(
+        payload.logs,
+        workflow.id,
+        workflow.pluginId,
+        workflow.traceId,
+        workflow.eventId,
+        workflow.runId,
+        workflow.correlationId,
+        workflow.lastEventId,
+        filters.logQuery,
+      );
 
       return (
         <>
@@ -1397,12 +1424,17 @@ function App() {
           >
             <div className="detail-grid">
               <DetailField label="Status" value={<StatusPill label={workflow.status} tone={workflow.completed ? 'good' : 'default'} />} />
+              <DetailField label="Trace ID" value={workflow.traceId ?? '—'} />
+              <DetailField label="Origin event ID" value={workflow.eventId ?? '—'} />
+              <DetailField label="Run ID" value={workflow.runId ?? '—'} />
+              <DetailField label="Correlation ID" value={workflow.correlationId ?? '—'} />
               <DetailField label="Current index" value={workflow.currentIndex} />
               <DetailField label="Waiting for" value={workflow.waitingFor ?? '—'} />
               <DetailField label="Sleeping until" value={formatTimestamp(workflow.sleepingUntil)} />
               <DetailField label="Completed" value={workflow.completed ? 'true' : 'false'} />
               <DetailField label="Compensated" value={workflow.compensated ? 'true' : 'false'} />
-              <DetailField label="Last event" value={workflow.lastEventId ?? '—'} />
+              <DetailField label="Last event cursor" value={workflow.lastEventId ?? '—'} />
+              <DetailField label="Last event type" value={workflow.lastEventType ?? '—'} />
               <DetailField label="Status source" value={workflow.statusSource ?? '—'} />
             </div>
             <pre className="code-block">{JSON.stringify(workflow.state ?? {}, null, 2)}</pre>
@@ -1461,7 +1493,7 @@ function App() {
                   <StatusPill label={workflow.status} tone={workflow.completed ? 'good' : 'default'} />
                 </div>
                 <p>{workflow.summary ?? 'No workflow summary available.'}</p>
-                <span className="list-meta">plugin {workflow.pluginId}</span>
+                <span className="list-meta">plugin {workflow.pluginId} · trace {workflow.traceId ?? '—'} · event {workflow.eventId ?? '—'}</span>
               </RouteLink>
             ))}
           </div>
