@@ -196,6 +196,10 @@ type runtimeConsoleResponse struct {
 	Workflows []struct {
 		ID             string `json:"id"`
 		PluginID       string `json:"pluginId"`
+		TraceID        string `json:"traceId"`
+		EventID        string `json:"eventId"`
+		RunID          string `json:"runId"`
+		CorrelationID  string `json:"correlationId"`
 		Status         string `json:"status"`
 		WaitingFor     string `json:"waitingFor"`
 		Completed      bool   `json:"completed"`
@@ -749,6 +753,7 @@ func TestRuntimeAppDefaultPluginHostRoutingCrashRecoversWorkflowSubprocessAndExp
 	if storedWorkflow.PluginID != "plugin-workflow-demo" || storedWorkflow.Status != runtimecore.WorkflowRuntimeStatusWaitingEvent || storedWorkflow.Workflow.State["greeting"] != "crash once" {
 		t.Fatalf("expected recovered workflow state after injected crash, got %+v", storedWorkflow)
 	}
+	storedWorkflowObservability := loadRuntimeWorkflowObservabilityRow(t, app, "workflow-user-crash")
 	if statusCode, health := readRuntimeHealthResponse(t, app); statusCode != http.StatusOK || health.Status != "ok" || !health.Components.Scheduler.Running {
 		t.Fatalf("expected app to stay healthy after subprocess crash without restart, status=%d payload=%+v", statusCode, health)
 	}
@@ -758,10 +763,29 @@ func TestRuntimeAppDefaultPluginHostRoutingCrashRecoversWorkflowSubprocessAndExp
 	if metricsResp.Code != http.StatusOK {
 		t.Fatalf("expected metrics 200 after subprocess crash, got %d: %s", metricsResp.Code, metricsResp.Body.String())
 	}
-	if !strings.Contains(metricsResp.Body.String(), `bot_platform_subprocess_dispatch_last_duration_ms{plugin_id="plugin-workflow-demo",operation="event"}`) {
-		t.Fatalf("expected metrics surface to remain available for workflow plugin after crash recovery, got %s", metricsResp.Body.String())
+	for _, expected := range []string{
+		`bot_platform_subprocess_dispatch_last_duration_ms{plugin_id="plugin-workflow-demo",operation="event"}`,
+		`bot_platform_subprocess_failure_total{plugin_id="plugin-workflow-demo",operation="event",failure_stage="dispatch",failure_reason="crash_after_handshake"} 1`,
+		`bot_platform_subprocess_failures_total{plugin_id="plugin-workflow-demo",failure_stage="dispatch",failure_reason="crash_after_handshake"} 1`,
+	} {
+		if !strings.Contains(metricsResp.Body.String(), expected) {
+			t.Fatalf("expected subprocess crash metrics evidence %q, got %s", expected, metricsResp.Body.String())
+		}
+	}
+	if rendered := app.tracer.RenderTrace(storedWorkflowObservability.TraceID); !strings.Contains(rendered, `runtime.dispatch event_id=`+storedWorkflowObservability.EventID) || !strings.Contains(rendered, `plugin.invoke event_id=`+storedWorkflowObservability.EventID+` plugin_id=plugin-workflow-demo`) || !strings.Contains(rendered, `reply.send event_id=`+storedWorkflowObservability.EventID+` plugin_id=plugin-workflow-demo`) {
+		t.Fatalf("expected recovered crash trace to preserve correlatable runtime, plugin, and reply spans, got %s", rendered)
 	}
 	combinedLogs := output.String() + strings.Join(app.logs.Lines(), "")
+	crashEvidenceMatched := false
+	for _, line := range strings.Split(combinedLogs, "\n") {
+		if strings.Contains(line, `subprocess host dispatch failed after handshake`) && strings.Contains(line, storedWorkflowObservability.TraceID) && strings.Contains(line, storedWorkflowObservability.EventID) {
+			crashEvidenceMatched = true
+			break
+		}
+	}
+	if !crashEvidenceMatched {
+		t.Fatalf("expected subprocess crash logs to carry the same trace_id/event_id as the recovered workflow chain, got %s", combinedLogs)
+	}
 	for _, expected := range []string{"subprocess host dispatch failed after handshake", `"plugin_id":"plugin-workflow-demo"`, `"failure_stage":"dispatch"`, `"failure_reason":"crash_after_handshake"`} {
 		if !strings.Contains(combinedLogs, expected) {
 			t.Fatalf("expected crash failure log evidence %q, got %s", expected, combinedLogs)
@@ -2371,9 +2395,10 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	configPath := writeTestConfigAt(t, dir)
+	exporter := runtimecore.NewInMemoryTraceExporter()
+	configPath := writeTestConfigWithTraceExporterAt(t, dir, true, "test", "memory://wave5a-workflow")
 
-	app, err := newRuntimeApp(configPath)
+	app, err := newRuntimeAppWithOptions(configPath, runtimeAppBuildOptions{traceExporter: exporter})
 	if err != nil {
 		t.Fatalf(`new runtime app: %v`, err)
 	}
@@ -2402,6 +2427,34 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 	startedEventID := startedObservability.EventID
 	startedRunID := startedObservability.RunID
 	startedCorrelationID := startedObservability.CorrelationID
+	var startedPayload struct {
+		EventID    string        `json:"event_id"`
+		TraceID    string        `json:"trace_id"`
+		WorkflowID string        `json:"workflow_id"`
+		Replies    []replyRecord `json:"replies"`
+	}
+	if err := json.Unmarshal(startResp.Body.Bytes(), &startedPayload); err != nil {
+		t.Fatalf(`decode workflow start response: %v`, err)
+	}
+	if startedPayload.EventID != startedEventID || startedPayload.TraceID != startedTraceID || startedPayload.WorkflowID != `workflow-user-1` {
+		t.Fatalf(`expected workflow start response ids to match persisted workflow observability row, got response=%+v persisted=%+v`, startedPayload, startedObservability)
+	}
+	if len(startedPayload.Replies) != 1 || startedPayload.Replies[0].Payload != `workflow started, please send another message to continue` {
+		t.Fatalf(`expected workflow start response to expose reply payload, got %+v`, startedPayload.Replies)
+	}
+	if rendered := app.tracer.RenderTrace(startedTraceID); !strings.Contains(rendered, `runtime.dispatch event_id=`+startedEventID) || !strings.Contains(rendered, `plugin_host.dispatch event_id=`+startedEventID+` plugin_id=plugin-workflow-demo`) || !strings.Contains(rendered, `reply.send event_id=`+startedEventID+` plugin_id=plugin-workflow-demo`) {
+		t.Fatalf(`expected workflow start trace to correlate runtime, plugin host, and reply spans, got %s`, rendered)
+	}
+	startedExported := exportedTraceSpans(t, exporter, startedTraceID)
+	startedSpanNames := map[string]bool{}
+	for _, span := range startedExported {
+		startedSpanNames[span.SpanName] = true
+	}
+	for _, spanName := range []string{"runtime.event.dispatch", "plugin.dispatch", "plugin_host.dispatch", "reply.dispatch"} {
+		if !startedSpanNames[spanName] {
+			t.Fatalf(`expected exported workflow start trace to include %q, got %+v`, spanName, startedExported)
+		}
+	}
 	entries := app.logs.Lines()
 	matchedStartReply := false
 	for _, line := range entries {
@@ -2417,7 +2470,7 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 		t.Fatalf(`close first app: %v`, err)
 	}
 
-	restarted, err := newRuntimeApp(configPath)
+	restarted, err := newRuntimeAppWithOptions(configPath, runtimeAppBuildOptions{traceExporter: exporter})
 	if err != nil {
 		t.Fatalf(`restart runtime app: %v`, err)
 	}
@@ -2458,8 +2511,50 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 	if !matchedResumeReply {
 		t.Fatalf(`expected workflow resume reply log to correlate back to origin ids, got %+v`, restartedEntries)
 	}
-	if rendered := restarted.tracer.RenderTrace(completedObservability.TraceID); !strings.Contains(rendered, `reply.send`) {
-		t.Fatalf(`expected reply.send span on workflow trace, got %s`, rendered)
+	var resumedPayload struct {
+		EventID    string        `json:"event_id"`
+		TraceID    string        `json:"trace_id"`
+		WorkflowID string        `json:"workflow_id"`
+		Replies    []replyRecord `json:"replies"`
+	}
+	if err := json.Unmarshal(resumeResp.Body.Bytes(), &resumedPayload); err != nil {
+		t.Fatalf(`decode workflow resume response: %v`, err)
+	}
+	if resumedPayload.EventID != completed.LastEventID || resumedPayload.WorkflowID != `workflow-user-1` {
+		t.Fatalf(`expected workflow resume response to expose latest trigger event and stable workflow id, got response=%+v completed=%+v`, resumedPayload, completed)
+	}
+	if resumedPayload.TraceID == `` || resumedPayload.TraceID == startedTraceID {
+		t.Fatalf(`expected workflow resume response to carry the live trigger trace while persistence keeps origin trace stable, got start=%q resume=%+v`, startedTraceID, resumedPayload)
+	}
+	if len(resumedPayload.Replies) != 1 || resumedPayload.Replies[0].Payload != `workflow resumed and completed` {
+		t.Fatalf(`expected workflow resume response to expose reply payload, got %+v`, resumedPayload.Replies)
+	}
+	if rendered := restarted.tracer.RenderTrace(completedObservability.TraceID); !strings.Contains(rendered, `reply.send event_id=`+startedEventID+` plugin_id=plugin-workflow-demo`) {
+		t.Fatalf(`expected origin workflow trace to preserve correlation into resumed reply span, got %s`, rendered)
+	}
+	if resumedRendered := restarted.tracer.RenderTrace(resumedPayload.TraceID); !strings.Contains(resumedRendered, `runtime.dispatch event_id=`+resumedPayload.EventID) || !strings.Contains(resumedRendered, `plugin_host.dispatch event_id=`+resumedPayload.EventID+` plugin_id=plugin-workflow-demo`) {
+		t.Fatalf(`expected live resume trace to show dispatch through current runtime surfaces, got %s`, resumedRendered)
+	}
+	resumedExported := exportedTraceSpans(t, exporter, resumedPayload.TraceID)
+	resumedSpanNames := map[string]bool{}
+	for _, span := range resumedExported {
+		resumedSpanNames[span.SpanName] = true
+	}
+	for _, spanName := range []string{"runtime.event.dispatch", "plugin.dispatch", "plugin_host.dispatch"} {
+		if !resumedSpanNames[spanName] {
+			t.Fatalf(`expected exported workflow resume trace to include %q, got %+v`, spanName, resumedExported)
+		}
+	}
+	originExported := exportedTraceSpans(t, exporter, completedObservability.TraceID)
+	originReplyExported := false
+	for _, span := range originExported {
+		if span.SpanName == "reply.dispatch" && span.EventID == startedEventID && span.PluginID == "plugin-workflow-demo" {
+			originReplyExported = true
+			break
+		}
+	}
+	if !originReplyExported {
+		t.Fatalf(`expected exporter path to retain resumed reply correlation on origin workflow trace, got %+v`, originExported)
 	}
 	consoleReq := httptest.NewRequest(http.MethodGet, "/api/console", nil)
 	consoleResp := httptest.NewRecorder()
@@ -2469,6 +2564,9 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 	}
 	if !strings.Contains(consoleResp.Body.String(), `"workflow_read_model": "sqlite-workflow-instances"`) {
 		t.Fatalf(`expected console meta to expose workflow read model, got %s`, consoleResp.Body.String())
+	}
+	if !strings.Contains(consoleResp.Body.String(), `"trace_source": "runtime-trace-recorder+test-exporter"`) {
+		t.Fatalf(`expected console meta to expose local exporter path, got %s`, consoleResp.Body.String())
 	}
 	var console runtimeConsoleResponse
 	if err := json.Unmarshal(consoleResp.Body.Bytes(), &console); err != nil {
@@ -2483,6 +2581,9 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 		}
 		if workflow.PluginID != `plugin-workflow-demo` || workflow.Status != `completed` || !workflow.Completed || !workflow.Compensated {
 			t.Fatalf(`expected completed workflow facts in console payload, got %+v`, workflow)
+		}
+		if workflow.TraceID != startedTraceID || workflow.EventID != startedEventID || workflow.RunID != startedRunID || workflow.CorrelationID != startedCorrelationID {
+			t.Fatalf(`expected console workflow payload to expose stable origin observability ids, got %+v`, workflow)
 		}
 		if workflow.StatusSource != `sqlite-workflow-instances` || !workflow.StatePersisted || workflow.RuntimeOwner != `runtime-core` {
 			t.Fatalf(`expected workflow console provenance metadata, got %+v`, workflow)
@@ -3417,7 +3518,7 @@ func TestRuntimeAppConsoleReadsPersistedAuditEntriesFromSQLiteState(t *testing.T
 		ErrorCode:     "schedule_cancelled",
 		OccurredAt:    "2026-04-21T09:00:00Z",
 	}
-	if err := app.state.SaveAudit(t.Context(), entry); err != nil {
+	if err := app.auditRecorder.RecordAudit(entry); err != nil {
 		t.Fatalf("save persisted audit: %v", err)
 	}
 
