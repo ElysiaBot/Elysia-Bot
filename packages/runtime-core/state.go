@@ -175,6 +175,23 @@ CREATE TABLE IF NOT EXISTS rollout_operation_records (
   occurred_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  actor TEXT NOT NULL,
+  permission TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  allowed INTEGER NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  trace_id TEXT NOT NULL DEFAULT '',
+  event_id TEXT NOT NULL DEFAULT '',
+  plugin_id TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL DEFAULT '',
+  correlation_id TEXT NOT NULL DEFAULT '',
+  error_category TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
+  occurred_at TEXT NOT NULL
+ );
 `
 
 const CurrentRBACSnapshotKey = "current"
@@ -1243,6 +1260,7 @@ func (s *SQLiteStateStore) Counts(ctx context.Context) (map[string]int, error) {
 		"rbac_snapshots":            `SELECT COUNT(*) FROM rbac_snapshots`,
 		"replay_operation_records":  `SELECT COUNT(*) FROM replay_operation_records`,
 		"rollout_operation_records": `SELECT COUNT(*) FROM rollout_operation_records`,
+		"audit_log":                 `SELECT COUNT(*) FROM audit_log`,
 	}
 
 	counts := make(map[string]int, len(tables))
@@ -1261,6 +1279,70 @@ func (s *SQLiteStateStore) SaveReplayOperationRecord(ctx context.Context, record
 		return fmt.Errorf("save replay operation record: sqlite state store is required")
 	}
 	return saveReplayOperationRecordWithExecutor(ctx, s.db, record)
+}
+
+func (s *SQLiteStateStore) SaveAudit(ctx context.Context, entry pluginsdk.AuditEntry) error {
+	if s == nil {
+		return fmt.Errorf("save audit: sqlite state store is required")
+	}
+	return saveAuditWithExecutor(ctx, s.db, entry)
+}
+
+func (s *SQLiteStateStore) RecordAudit(entry pluginsdk.AuditEntry) error {
+	if s == nil {
+		return fmt.Errorf("record audit: sqlite state store is required")
+	}
+	return s.SaveAudit(context.Background(), entry)
+}
+
+func saveAuditWithExecutor(ctx context.Context, executor sqliteExecContexter, entry pluginsdk.AuditEntry) error {
+	occurredAt, err := parseAuditOccurredAt(entry.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("parse audit occurred_at: %w", err)
+	}
+	_, err = executor.ExecContext(ctx, `
+INSERT INTO audit_log (
+  actor, permission, action, target, allowed, reason,
+  trace_id, event_id, plugin_id, run_id, correlation_id,
+  error_category, error_code, occurred_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, strings.TrimSpace(entry.Actor), strings.TrimSpace(entry.Permission), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.Target), boolToSQLiteInt(entry.Allowed), strings.TrimSpace(auditEntryReason(entry)),
+		strings.TrimSpace(entry.TraceID), strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.PluginID), strings.TrimSpace(entry.RunID), strings.TrimSpace(entry.CorrelationID),
+		strings.TrimSpace(entry.ErrorCategory), strings.TrimSpace(entry.ErrorCode), formatSQLiteTimestamp(occurredAt))
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStateStore) ListAudits(ctx context.Context) ([]pluginsdk.AuditEntry, error) {
+	if s == nil {
+		return nil, fmt.Errorf("list audits: sqlite state store is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT actor, permission, action, target, allowed, reason,
+       trace_id, event_id, plugin_id, run_id, correlation_id,
+       error_category, error_code, occurred_at
+FROM audit_log
+ORDER BY occurred_at ASC, rowid ASC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list audits: %w", err)
+	}
+	defer rows.Close()
+	return scanAuditEntries(rows)
+}
+
+func (s *SQLiteStateStore) AuditEntries() []pluginsdk.AuditEntry {
+	if s == nil {
+		return nil
+	}
+	entries, err := s.ListAudits(context.Background())
+	if err != nil {
+		return nil
+	}
+	return entries
 }
 
 func saveReplayOperationRecordWithExecutor(ctx context.Context, executor sqliteExecContexter, record ReplayOperationRecord) error {
@@ -1800,6 +1882,48 @@ func scanRolloutOperationRecords(rows *sql.Rows) ([]RolloutOperationRecord, erro
 		return nil, fmt.Errorf("iterate rollout operation records: %w", err)
 	}
 	return records, nil
+}
+
+func scanAuditEntries(rows *sql.Rows) ([]pluginsdk.AuditEntry, error) {
+	entries := make([]pluginsdk.AuditEntry, 0)
+	for rows.Next() {
+		var (
+			entry         pluginsdk.AuditEntry
+			allowed       int
+			reason        string
+			occurredAtRaw string
+		)
+		if err := rows.Scan(
+			&entry.Actor,
+			&entry.Permission,
+			&entry.Action,
+			&entry.Target,
+			&allowed,
+			&reason,
+			&entry.TraceID,
+			&entry.EventID,
+			&entry.PluginID,
+			&entry.RunID,
+			&entry.CorrelationID,
+			&entry.ErrorCategory,
+			&entry.ErrorCode,
+			&occurredAtRaw,
+		); err != nil {
+			return nil, fmt.Errorf("scan audit entry: %w", err)
+		}
+		entry.Allowed = allowed == 1
+		parsedOccurredAt, err := parseSQLiteTimestamp(occurredAtRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse audit occurred_at: %w", err)
+		}
+		entry.OccurredAt = parsedOccurredAt.UTC().Format(time.RFC3339Nano)
+		setAuditEntryReason(&entry, strings.TrimSpace(reason))
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate audits: %w", err)
+	}
+	return entries, nil
 }
 
 func scanStoredSchedulePlans(rows *sql.Rows) ([]storedSchedulePlan, error) {

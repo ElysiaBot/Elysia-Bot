@@ -237,7 +237,7 @@ func (r *InMemoryRuntime) DispatchEvent(ctx context.Context, event eventmodel.Ev
 			}
 			if err := eventAuth.AuthorizeEvent(ctx, event, executionContext, plugin); err != nil {
 				actor, permission := eventAuthorizationFields(event)
-				r.recordAuthorizationDeniedAudit(auditRecorder, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
+				r.recordAuthorizationDeniedAudit(auditRecorder, executionContext, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
 				return err
 			}
 			return nil
@@ -262,7 +262,7 @@ func (r *InMemoryRuntime) DispatchCommand(ctx context.Context, command eventmode
 	if commandAuth != nil {
 		if err := commandAuth.AuthorizeCommand(ctx, command, executionContext); err != nil {
 			actor, action, target, permission, targetKind := commandAuthorizationFields(command)
-			r.recordAuthorizationDeniedAudit(auditRecorder, actor, permission, target, authorizationDeniedAuditReason(err))
+			r.recordAuthorizationDeniedAudit(auditRecorder, executionContext, actor, permission, target, authorizationDeniedAuditReason(err))
 			r.log("error", "runtime command authorization failed", logContextFromExecutionContext(executionContext), FailureLogFields("runtime", "dispatch.command.authorize", err, authorizationDeniedAuditReason(err), map[string]any{"command_name": command.Name, "actor": actor, "action": action, "target": target, "permission": permission}))
 			_ = targetKind
 			return err
@@ -311,25 +311,35 @@ func RecordAuthorizationDeniedAudit(recorder AuditRecorder, actor, permission, t
 	if err == nil {
 		return
 	}
-	recordAuthorizationDeniedAuditWithReason(recorder, actor, permission, target, authorizationDeniedAuditReason(err))
+	recordAuthorizationDeniedAuditWithReason(recorder, eventmodel.ExecutionContext{}, actor, permission, target, authorizationDeniedAuditReason(err))
 }
 
-func (r *InMemoryRuntime) recordAuthorizationDeniedAudit(recorder AuditRecorder, actor, permission, target, reason string) {
-	recordAuthorizationDeniedAuditWithReason(recorder, actor, permission, target, reason)
+func RecordAuthorizationDeniedAuditWithContext(recorder AuditRecorder, executionContext eventmodel.ExecutionContext, actor, permission, target string, err error) {
+	if err == nil {
+		return
+	}
+	recordAuthorizationDeniedAuditWithReason(recorder, executionContext, actor, permission, target, authorizationDeniedAuditReason(err))
 }
 
-func recordAuthorizationDeniedAuditWithReason(recorder AuditRecorder, actor, permission, target, reason string) {
+func (r *InMemoryRuntime) recordAuthorizationDeniedAudit(recorder AuditRecorder, executionContext eventmodel.ExecutionContext, actor, permission, target, reason string) {
+	recordAuthorizationDeniedAuditWithReason(recorder, executionContext, actor, permission, target, reason)
+}
+
+func recordAuthorizationDeniedAuditWithReason(recorder AuditRecorder, executionContext eventmodel.ExecutionContext, actor, permission, target, reason string) {
 	if recorder == nil || permission == "" || target == "" {
 		return
 	}
 	entry := pluginsdk.AuditEntry{
-		Actor:      actor,
-		Permission: permission,
-		Action:     strings.ReplaceAll(permission, ":", "."),
-		Target:     target,
-		Allowed:    false,
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Actor:         actor,
+		Permission:    permission,
+		Action:        strings.ReplaceAll(permission, ":", "."),
+		Target:        target,
+		Allowed:       false,
+		ErrorCategory: "authorization",
+		ErrorCode:     reason,
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339),
 	}
+	ApplyAuditExecutionContext(&entry, executionContext)
 	setAuditEntryReason(&entry, reason)
 	_ = recorder.RecordAudit(entry)
 }
@@ -534,7 +544,7 @@ func (r *InMemoryRuntime) DispatchJob(ctx context.Context, job pluginsdk.JobInvo
 			}
 			if err := jobAuth.AuthorizeJob(ctx, job, executionContext, plugin); err != nil {
 				actor, permission := metadataAuthorizationFields(job.Metadata)
-				r.recordAuthorizationDeniedAudit(auditRecorder, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
+				r.recordAuthorizationDeniedAudit(auditRecorder, executionContext, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
 				return err
 			}
 			return nil
@@ -828,7 +838,7 @@ func (r *InMemoryRuntime) DispatchSchedule(ctx context.Context, trigger pluginsd
 			}
 			if err := scheduleAuth.AuthorizeSchedule(ctx, trigger, executionContext, plugin); err != nil {
 				actor, permission := metadataAuthorizationFields(trigger.Metadata)
-				r.recordAuthorizationDeniedAudit(auditRecorder, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
+				r.recordAuthorizationDeniedAudit(auditRecorder, executionContext, actor, permission, plugin.Manifest.ID, authorizationDeniedAuditReason(err))
 				return err
 			}
 			return nil

@@ -81,8 +81,71 @@ func TestSQLiteStateStorePersistsCoreMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts: %v", err)
 	}
-	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["alerts"] != 0 || counts["schedule_plans"] != 1 {
+	if counts["event_journal"] != 1 || counts["plugin_registry"] != 1 || counts["plugin_enabled_overlays"] != 0 || counts["plugin_configs"] != 0 || counts["plugin_status_snapshots"] != 0 || counts["sessions"] != 1 || counts["idempotency_keys"] != 1 || counts["jobs"] != 1 || counts["alerts"] != 0 || counts["schedule_plans"] != 1 || counts["audit_log"] != 0 {
 		t.Fatalf("unexpected counts: %+v", counts)
+	}
+}
+
+func TestSQLiteStateStorePersistsAuditEntriesWithObservabilityFieldsAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	ctx := context.Background()
+	entry := pluginsdk.AuditEntry{
+		Actor:         "job-operator",
+		Permission:    "job:retry",
+		Action:        "retry",
+		Target:        "job-audit-1",
+		Allowed:       true,
+		Reason:        "job_dead_letter_retried",
+		TraceID:       "trace-audit-1",
+		EventID:       "evt-audit-1",
+		PluginID:      "plugin-ai-chat",
+		RunID:         "run-audit-1",
+		CorrelationID: "corr-audit-1",
+		ErrorCategory: "operator",
+		ErrorCode:     "job_dead_letter_retried",
+		OccurredAt:    "2026-04-21T08:00:00Z",
+	}
+
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SaveAudit(ctx, entry); err != nil {
+		t.Fatalf("save audit: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	entries, err := reopened.ListAudits(ctx)
+	if err != nil {
+		t.Fatalf("list audits: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one persisted audit entry, got %+v", entries)
+	}
+	got := entries[0]
+	if got != entry {
+		t.Fatalf("expected persisted audit entry to round-trip, got %+v", got)
+	}
+	counts, err := reopened.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts after reopen: %v", err)
+	}
+	if counts["audit_log"] != 1 {
+		t.Fatalf("expected one persisted audit row, got %+v", counts)
+	}
+	viaReader := reopened.AuditEntries()
+	if len(viaReader) != 1 || viaReader[0] != entry {
+		t.Fatalf("expected audit reader path to expose persisted entry, got %+v", viaReader)
 	}
 }
 

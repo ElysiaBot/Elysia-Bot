@@ -3328,11 +3328,17 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 			ObjectID string `json:"objectId"`
 		} `json:"alerts"`
 		Audits []struct {
-			Actor   string `json:"actor"`
-			Action  string `json:"action"`
-			Target  string `json:"target"`
-			Allowed bool   `json:"allowed"`
-			Reason  string `json:"reason"`
+			Actor         string `json:"actor"`
+			Action        string `json:"action"`
+			Target        string `json:"target"`
+			Allowed       bool   `json:"allowed"`
+			Reason        string `json:"reason"`
+			TraceID       string `json:"trace_id"`
+			EventID       string `json:"event_id"`
+			PluginID      string `json:"plugin_id"`
+			RunID         string `json:"run_id"`
+			CorrelationID string `json:"correlation_id"`
+			ErrorCode     string `json:"error_code"`
 		} `json:"audits"`
 	}
 	if err := json.Unmarshal(consoleResp.Body.Bytes(), &payload); err != nil {
@@ -3355,7 +3361,7 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 	}
 	auditVisible := false
 	for _, entry := range payload.Audits {
-		if entry.Actor == "job-operator" && entry.Action == "retry" && entry.Target == "job-dead-retry-console" && entry.Allowed && entry.Reason == "job_dead_letter_retried" {
+		if entry.Actor == "job-operator" && entry.Action == "retry" && entry.Target == "job-dead-retry-console" && entry.Allowed && entry.Reason == "job_dead_letter_retried" && entry.TraceID == "trace-job-dead-retry-console" && entry.EventID == "evt-job-dead-retry-console" && entry.PluginID == "" && entry.RunID == "" && entry.CorrelationID == "runtime-ai:user-retry:hello retry" && entry.ErrorCode == "job_dead_letter_retried" {
 			auditVisible = true
 			break
 		}
@@ -3371,6 +3377,9 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 	if lastEntry.Actor != "job-operator" || lastEntry.Permission != "job:retry" || lastEntry.Action != "retry" || lastEntry.Target != "job-dead-retry-console" || !lastEntry.Allowed || lastEntry.Reason != "job_dead_letter_retried" {
 		t.Fatalf("expected distinct retry audit entry, got %+v", lastEntry)
 	}
+	if lastEntry.TraceID != "trace-job-dead-retry-console" || lastEntry.EventID != "evt-job-dead-retry-console" || lastEntry.RunID != "" || lastEntry.CorrelationID != "runtime-ai:user-retry:hello retry" || lastEntry.ErrorCode != "job_dead_letter_retried" {
+		t.Fatalf("expected retry audit observability fields, got %+v", lastEntry)
+	}
 	if lastEntry.Action == "replay" || strings.Contains(lastEntry.Reason, "replay") {
 		t.Fatalf("expected retry audit to remain distinct from replay, got %+v", lastEntry)
 	}
@@ -3380,6 +3389,48 @@ func TestRuntimeAppRetryDeadLetterOperatorRequeuesJobClearsConsoleAlertAndRecord
 	}
 	if counts["alerts"] != 0 {
 		t.Fatalf("expected retry to resolve persisted dead-letter alert, got %+v", counts)
+	}
+}
+
+func TestRuntimeAppConsoleReadsPersistedAuditEntriesFromSQLiteState(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	entry := pluginsdk.AuditEntry{
+		Actor:         "schedule-admin",
+		Permission:    "schedule:cancel",
+		Action:        "cancel",
+		Target:        "schedule-persisted-audit",
+		Allowed:       true,
+		Reason:        "schedule_cancelled",
+		TraceID:       "trace-persisted-console-audit",
+		EventID:       "evt-persisted-console-audit",
+		PluginID:      "plugin-scheduler",
+		RunID:         "run-persisted-console-audit",
+		CorrelationID: "corr-persisted-console-audit",
+		ErrorCategory: "operator",
+		ErrorCode:     "schedule_cancelled",
+		OccurredAt:    "2026-04-21T09:00:00Z",
+	}
+	if err := app.state.SaveAudit(t.Context(), entry); err != nil {
+		t.Fatalf("save persisted audit: %v", err)
+	}
+
+	consoleReq := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	consoleResp := httptest.NewRecorder()
+	app.ServeHTTP(consoleResp, consoleReq)
+	if consoleResp.Code != http.StatusOK {
+		t.Fatalf("expected console 200, got %d: %s", consoleResp.Code, consoleResp.Body.String())
+	}
+	for _, expected := range []string{`"trace_id": "trace-persisted-console-audit"`, `"event_id": "evt-persisted-console-audit"`, `"plugin_id": "plugin-scheduler"`, `"run_id": "run-persisted-console-audit"`, `"correlation_id": "corr-persisted-console-audit"`, `"error_category": "operator"`, `"error_code": "schedule_cancelled"`} {
+		if !strings.Contains(consoleResp.Body.String(), expected) {
+			t.Fatalf("expected console persisted audit payload to include %q, got %s", expected, consoleResp.Body.String())
+		}
 	}
 }
 

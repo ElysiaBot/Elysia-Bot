@@ -41,6 +41,7 @@ type runtimeApp struct {
 	onebotRoutes    map[string]runtimecore.RuntimeBotInstance
 	webhookRoutes   map[string]*adapterwebhook.Adapter
 	audits          *runtimecore.InMemoryAuditLog
+	auditRecorder   runtimecore.AuditRecorder
 	state           *runtimecore.SQLiteStateStore
 	smokeStore      runtimeSmokeStore
 	replay          *runtimeAppReplayService
@@ -567,7 +568,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	}
 	metrics := runtimecore.NewMetricsRegistry()
 	replies := newReplyBuffer(logger, tracer)
-	audits := runtimecore.NewInMemoryAuditLog()
+	inMemoryAudits := runtimecore.NewInMemoryAuditLog()
 	queue := runtimecore.NewJobQueue()
 	queue.SetObservability(logger, tracer, metrics)
 	queue.SetWorkerIdentity(runtimeWorkerID())
@@ -603,7 +604,9 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	scheduler.SetObservability(logger, tracer, metrics)
 	scheduler.SetStore(state)
 	workflowRuntime := runtimecore.NewWorkflowRuntime(state)
-	if metricsAwareWorkflowRuntime, ok := any(workflowRuntime).(interface{ SetMetrics(*runtimecore.MetricsRegistry) }); ok {
+	if metricsAwareWorkflowRuntime, ok := any(workflowRuntime).(interface {
+		SetMetrics(*runtimecore.MetricsRegistry)
+	}); ok {
 		metricsAwareWorkflowRuntime.SetMetrics(metrics)
 	}
 	if err := workflowRuntime.Restore(context.Background()); err != nil {
@@ -627,7 +630,8 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		host.SetObservability(logger, tracer, metrics)
 	}
 	runtime.SetObservability(logger, tracer, metrics)
-	runtime.SetAuditRecorder(audits)
+	persistedAuditRecorder := runtimecore.NewMultiAuditRecorder(inMemoryAudits, state)
+	runtime.SetAuditRecorder(persistedAuditRecorder)
 	runtime.SetDispatchRecorder(state)
 	lifecycle := runtimecore.NewPluginLifecycleService(state)
 	runtime.SetPluginEnabledStateSource(lifecycle)
@@ -644,7 +648,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		return nil, fmt.Errorf("selected smoke store backend %q does not implement event journal reader", settings.SmokeStoreBackend)
 	}
 	replayService := &runtimeAppReplayService{journal: replayJournal, runtime: runtime, store: state}
-	aiProvider, err := buildAIProvider(context.Background(), config, runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, audits), logger)
+	aiProvider, err := buildAIProvider(context.Background(), config, runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, persistedAuditRecorder), logger)
 	if err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
@@ -705,7 +709,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		aiDefinition.Manifest.ID:   nextRuntimeCandidateManifest(aiDefinition.Manifest),
 		"plugin-admin":             nextRuntimeCandidateManifest(pluginsdk.PluginManifest{ID: "plugin-admin", Version: "0.1.0", APIVersion: "v0", Mode: pluginsdk.ModeSubprocess}),
 	}}, state)
-	adminPlugin := pluginadmin.New(lifecycle, rolloutManager, replayService, authorizerProvider, actorRoles(config.RBAC), policies(config.RBAC), audits)
+	adminPlugin := pluginadmin.New(lifecycle, rolloutManager, replayService, authorizerProvider, actorRoles(config.RBAC), policies(config.RBAC), persistedAuditRecorder)
 	adminDefinition := adminPlugin.Definition()
 	if err := runtime.RegisterPlugin(adminDefinition); err != nil {
 		_ = smokeStore.Close()
@@ -737,7 +741,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	for _, instance := range onebotInstances {
 		onebotRoutes[instance.Path] = instance
 	}
-	secretRegistry := runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, audits)
+	secretRegistry := runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, persistedAuditRecorder)
 	webhookDispatcher := runtimeIngressDispatcher{runtime: runtime, smokeStore: smokeStore}
 	webhookRoutes := make(map[string]*adapterwebhook.Adapter, len(webhookInstances))
 	for _, instance := range botInstances {
@@ -762,7 +766,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 			return nil, fmt.Errorf("save %s adapter instance %q: %w", instance.Adapter, instance.ID, err)
 		}
 		if instance.Adapter == "webhook" {
-			webhookAdapter, err := adapterwebhook.NewWithSecretRef(config.Secrets.WebhookTokenRef, secretRegistry, webhookDispatcher, logger, audits)
+			webhookAdapter, err := adapterwebhook.NewWithSecretRef(config.Secrets.WebhookTokenRef, secretRegistry, webhookDispatcher, logger, persistedAuditRecorder)
 			if err != nil {
 				_ = smokeStore.Close()
 				_ = state.Close()
@@ -794,7 +798,8 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		onebotIngress:   onebotIngress,
 		onebotRoutes:    onebotRoutes,
 		webhookRoutes:   webhookRoutes,
-		audits:          audits,
+		audits:          inMemoryAudits,
+		auditRecorder:   persistedAuditRecorder,
 		state:           state,
 		smokeStore:      smokeStore,
 		replay:          replayService,
@@ -972,7 +977,8 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	console := runtimecore.NewConsoleAPI(a.runtimeRaw, a.queue, a.config, a.logs.Lines(), a.audits)
+	consoleAudits := runtimecore.NewJoinedAuditLog(a.auditRecorder, a.state)
+	console := runtimecore.NewConsoleAPI(a.runtimeRaw, a.queue, a.config, a.logs.Lines(), consoleAudits)
 	console.SetCurrentAuthorizerProvider(a.authorizer)
 	console.SetJobReader(runtimecore.NewSQLiteConsoleJobReader(a.state))
 	console.SetAlertReader(runtimecore.NewSQLiteConsoleAlertReader(a.state))
@@ -1252,8 +1258,13 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	permission := jobOperatorPermission(action)
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, permission, jobID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAudit(a.audits, actor, permission, jobID, err)
+		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{}, actor, permission, jobID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	current, err := a.queue.Inspect(r.Context(), jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	retried, err := a.queue.RetryDeadLetter(r.Context(), jobID)
@@ -1265,19 +1276,25 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	if a.audits != nil {
-		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
-			Actor:      actor,
-			Permission: permission,
-			Action:     "retry",
-			Target:     jobID,
-			Allowed:    true,
-			Reason:     "job_dead_letter_retried",
-			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		})
+	if a.auditRecorder != nil {
+		entry := pluginsdk.AuditEntry{
+			Actor:         actor,
+			Permission:    permission,
+			Action:        "retry",
+			Target:        jobID,
+			Allowed:       true,
+			TraceID:       current.TraceID,
+			EventID:       current.EventID,
+			RunID:         current.RunID,
+			CorrelationID: current.Correlation,
+			ErrorCode:     "job_dead_letter_retried",
+			OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+		}
+		entry.Reason = "job_dead_letter_retried"
+		_ = a.auditRecorder.RecordAudit(entry)
 	}
 	a.queue.DispatchReady(r.Context(), time.Now().UTC())
-	current, err := a.queue.Inspect(r.Context(), jobID)
+	current, err = a.queue.Inspect(r.Context(), jobID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1435,7 +1452,7 @@ func (a *runtimeApp) handleScheduleOperator(w http.ResponseWriter, r *http.Reque
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	permission := scheduleOperatorPermission(action)
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, permission, scheduleID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAudit(a.audits, actor, permission, scheduleID, err)
+		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{CorrelationID: scheduleID}, actor, permission, scheduleID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1461,16 +1478,19 @@ func (a *runtimeApp) handleScheduleOperator(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), status)
 		return
 	}
-	if a.audits != nil {
-		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
-			Actor:      actor,
-			Permission: permission,
-			Action:     action,
-			Target:     scheduleID,
-			Allowed:    true,
-			Reason:     "schedule_cancelled",
-			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		})
+	if a.auditRecorder != nil {
+		entry := pluginsdk.AuditEntry{
+			Actor:         actor,
+			Permission:    permission,
+			Action:        action,
+			Target:        scheduleID,
+			Allowed:       true,
+			CorrelationID: scheduleID,
+			ErrorCode:     "schedule_cancelled",
+			OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+		}
+		entry.Reason = "schedule_cancelled"
+		_ = a.auditRecorder.RecordAudit(entry)
 	}
 	if a.logger != nil {
 		_ = a.logger.Log("info", "runtime schedule cancelled", runtimecore.LogContext{}, map[string]any{
@@ -1572,7 +1592,7 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 	}
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, pluginConfigPermission, pluginID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAudit(a.audits, actor, pluginConfigPermission, pluginID, err)
+		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{PluginID: pluginID, CorrelationID: pluginID}, actor, pluginConfigPermission, pluginID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1590,16 +1610,20 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if a.audits != nil {
-		_ = a.audits.RecordAudit(pluginsdk.AuditEntry{
-			Actor:      actor,
-			Permission: pluginConfigPermission,
-			Action:     "config.update",
-			Target:     pluginID,
-			Allowed:    true,
-			Reason:     "plugin_config_updated",
-			OccurredAt: time.Now().UTC().Format(time.RFC3339),
-		})
+	if a.auditRecorder != nil {
+		entry := pluginsdk.AuditEntry{
+			Actor:         actor,
+			Permission:    pluginConfigPermission,
+			Action:        "config.update",
+			Target:        pluginID,
+			Allowed:       true,
+			PluginID:      pluginID,
+			CorrelationID: pluginID,
+			ErrorCode:     "plugin_config_updated",
+			OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+		}
+		entry.Reason = "plugin_config_updated"
+		_ = a.auditRecorder.RecordAudit(entry)
 	}
 	stored, err := a.state.LoadPluginConfig(r.Context(), pluginID)
 	if err != nil {
