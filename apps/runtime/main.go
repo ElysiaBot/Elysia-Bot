@@ -44,6 +44,7 @@ type runtimeApp struct {
 	audits          *runtimecore.InMemoryAuditLog
 	auditRecorder   runtimecore.AuditRecorder
 	state           *runtimecore.SQLiteStateStore
+	controlState    runtimeControlStateStore
 	smokeStore      runtimeSmokeStore
 	replay          *runtimeAppReplayService
 	pluginConfigs   appPluginConfigRegistry
@@ -389,7 +390,7 @@ func (s postgresRuntimeSmokeStore) Close() error {
 type runtimeAppReplayService struct {
 	journal runtimecore.EventJournalReader
 	runtime *runtimecore.InMemoryRuntime
-	store   *runtimecore.SQLiteStateStore
+	store   runtimeReplayOperationStore
 }
 
 func (s *runtimeAppReplayService) ReplayEvent(eventID string) (eventmodel.Event, error) {
@@ -745,18 +746,6 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite state store: %w", err)
 	}
-	var authorizerProvider *runtimecore.CurrentRBACAuthorizerProvider
-	if config.RBAC != nil {
-		if err := runtimecore.PersistConfiguredRBACState(context.Background(), state, config.RBAC); err != nil {
-			_ = state.Close()
-			return nil, fmt.Errorf("persist configured rbac state: %w", err)
-		}
-		authorizerProvider, err = runtimecore.NewCurrentRBACAuthorizerProviderFromStore(context.Background(), state)
-		if err != nil {
-			_ = state.Close()
-			return nil, fmt.Errorf("load current rbac snapshot: %w", err)
-		}
-	}
 	pluginConfigs := newAppPluginConfigRegistry()
 	queue.SetStore(state)
 	queue.SetAlertSink(state)
@@ -768,6 +757,26 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	if err != nil {
 		_ = state.Close()
 		return nil, err
+	}
+	controlState, err := runtimeSelectedControlStateStore(settings, smokeStore, state)
+	if err != nil {
+		_ = smokeStore.Close()
+		_ = state.Close()
+		return nil, fmt.Errorf("select control state store: %w", err)
+	}
+	var authorizerProvider *runtimecore.CurrentRBACAuthorizerProvider
+	if config.RBAC != nil {
+		if err := runtimecore.PersistConfiguredRBACState(context.Background(), controlState, config.RBAC); err != nil {
+			_ = smokeStore.Close()
+			_ = state.Close()
+			return nil, fmt.Errorf("persist configured rbac state: %w", err)
+		}
+		authorizerProvider, err = runtimecore.NewCurrentRBACAuthorizerProviderFromStore(context.Background(), controlState)
+		if err != nil {
+			_ = smokeStore.Close()
+			_ = state.Close()
+			return nil, fmt.Errorf("load current rbac snapshot: %w", err)
+		}
 	}
 	scheduler := runtimecore.NewScheduler()
 	scheduler.SetObservability(logger, tracer, metrics)
@@ -799,10 +808,10 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		host.SetObservability(logger, tracer, metrics)
 	}
 	runtime.SetObservability(logger, tracer, metrics)
-	persistedAuditRecorder := newRuntimeAuditRecorder(inMemoryAudits, sqliteRuntimeAuditRecorder{store: state})
+	persistedAuditRecorder := newRuntimeAuditRecorder(inMemoryAudits, controlState)
 	runtime.SetAuditRecorder(persistedAuditRecorder)
-	runtime.SetDispatchRecorder(state)
-	lifecycle := runtimecore.NewPluginLifecycleService(state)
+	runtime.SetDispatchRecorder(controlState)
+	lifecycle := runtimecore.NewPluginLifecycleService(controlState)
 	runtime.SetPluginEnabledStateSource(lifecycle)
 	if authorizerProvider != nil {
 		runtime.SetCommandAuthorizer(runtimecore.NewAdminCommandAuthorizerFromProvider(authorizerProvider))
@@ -816,7 +825,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("selected smoke store backend %q does not implement event journal reader", settings.SmokeStoreBackend)
 	}
-	replayService := &runtimeAppReplayService{journal: replayJournal, runtime: runtime, store: state}
+	replayService := &runtimeAppReplayService{journal: replayJournal, runtime: runtime, store: controlState}
 	aiProvider, err := buildAIProvider(context.Background(), config, runtimecore.NewSecretRegistry(runtimecore.EnvSecretProvider{}, persistedAuditRecorder), logger)
 	if err != nil {
 		_ = smokeStore.Close()
@@ -830,7 +839,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("plugin config binding for %q is required", "plugin-echo")
 	}
-	echoConfigState, err := loadPersistedPluginConfig(state, echoBinding)
+	echoConfigState, err := loadPersistedPluginConfig(controlState, echoBinding)
 	if err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
@@ -855,12 +864,12 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("register echo plugin: %w", err)
 	}
-	if err := state.SavePluginManifest(context.Background(), echoDefinition.Manifest); err != nil {
+	if err := controlState.SavePluginManifest(context.Background(), echoDefinition.Manifest); err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
 		return nil, fmt.Errorf("save echo plugin manifest: %w", err)
 	}
-	aiPlugin := pluginaichat.New(queue, aiProvider, state, replies)
+	aiPlugin := pluginaichat.New(queue, aiProvider, controlState, replies)
 	aiDefinition := aiPlugin.Definition()
 	aiDefinition.Handlers.Event = sourceScopedEventHandler{allowed: allowedSources("runtime-ai"), inner: aiPlugin}
 	if err := runtime.RegisterPlugin(aiDefinition); err != nil {
@@ -868,16 +877,16 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("register ai plugin: %w", err)
 	}
-	if err := state.SavePluginManifest(context.Background(), aiDefinition.Manifest); err != nil {
+	if err := controlState.SavePluginManifest(context.Background(), aiDefinition.Manifest); err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
 		return nil, fmt.Errorf("save ai plugin manifest: %w", err)
 	}
-	rolloutManager := runtimecore.NewSQLiteRolloutManager(sqlitePluginManifestReader{store: state}, sqliteStaticCandidateManifestReader{manifests: map[string]pluginsdk.PluginManifest{
+	rolloutManager := runtimecore.NewSQLiteRolloutManager(runtimePersistedPluginManifestReader{store: controlState}, sqliteStaticCandidateManifestReader{manifests: map[string]pluginsdk.PluginManifest{
 		echoDefinition.Manifest.ID: nextRuntimeCandidateManifest(echoDefinition.Manifest),
 		aiDefinition.Manifest.ID:   nextRuntimeCandidateManifest(aiDefinition.Manifest),
 		"plugin-admin":             nextRuntimeCandidateManifest(pluginsdk.PluginManifest{ID: "plugin-admin", Version: "0.1.0", APIVersion: "v0", Mode: pluginsdk.ModeSubprocess}),
-	}}, state)
+	}}, controlState)
 	adminPlugin := pluginadmin.New(lifecycle, rolloutManager, replayService, authorizerProvider, actorRoles(config.RBAC), policies(config.RBAC), persistedAuditRecorder)
 	adminDefinition := adminPlugin.Definition()
 	if err := runtime.RegisterPlugin(adminDefinition); err != nil {
@@ -885,7 +894,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("register admin plugin: %w", err)
 	}
-	if err := state.SavePluginManifest(context.Background(), adminDefinition.Manifest); err != nil {
+	if err := controlState.SavePluginManifest(context.Background(), adminDefinition.Manifest); err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
 		return nil, fmt.Errorf("save admin plugin manifest: %w", err)
@@ -898,7 +907,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		_ = state.Close()
 		return nil, fmt.Errorf("register workflow plugin: %w", err)
 	}
-	if err := state.SavePluginManifest(context.Background(), workflowDefinition.Manifest); err != nil {
+	if err := controlState.SavePluginManifest(context.Background(), workflowDefinition.Manifest); err != nil {
 		_ = smokeStore.Close()
 		_ = state.Close()
 		return nil, fmt.Errorf("save workflow plugin manifest: %w", err)
@@ -929,7 +938,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 			_ = state.Close()
 			return nil, err
 		}
-		if err := state.SaveAdapterInstance(context.Background(), adapterInstanceState); err != nil {
+		if err := controlState.SaveAdapterInstance(context.Background(), adapterInstanceState); err != nil {
 			_ = smokeStore.Close()
 			_ = state.Close()
 			return nil, fmt.Errorf("save %s adapter instance %q: %w", instance.Adapter, instance.ID, err)
@@ -970,6 +979,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		audits:          inMemoryAudits,
 		auditRecorder:   persistedAuditRecorder,
 		state:           state,
+		controlState:    controlState,
 		smokeStore:      smokeStore,
 		replay:          replayService,
 		pluginConfigs:   pluginConfigs,
@@ -1047,10 +1057,10 @@ func (a *runtimeApp) reloadCurrentRBACAuthorizer(ctx context.Context) error {
 	if a == nil || a.authorizer == nil {
 		return nil
 	}
-	if a.state == nil {
-		return fmt.Errorf("reload current rbac snapshot: sqlite state store is required")
+	if a.controlState == nil {
+		return fmt.Errorf("reload current rbac snapshot: control state store is required")
 	}
-	if err := a.authorizer.ReloadFromStore(ctx, a.state); err != nil {
+	if err := a.authorizer.ReloadFromStore(ctx, a.controlState); err != nil {
 		return fmt.Errorf("reload current rbac snapshot: %w", err)
 	}
 	return nil
@@ -1146,19 +1156,19 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	consoleAudits := runtimeAuditLog{recorder: a.auditRecorder, reader: sqliteRuntimeAuditEntriesReader{store: a.state}}
+	consoleAudits := runtimeAuditLog{recorder: a.auditRecorder, reader: a.controlState}
 	console := runtimecore.NewConsoleAPI(a.runtimeRaw, a.queue, a.config, a.logs.Lines(), consoleAudits)
 	console.SetCurrentAuthorizerProvider(a.authorizer)
 	console.SetJobReader(runtimecore.NewSQLiteConsoleJobReader(a.state))
 	console.SetAlertReader(runtimecore.NewSQLiteConsoleAlertReader(a.state))
-	console.SetReplayOperationReader(runtimecore.NewSQLiteConsoleReplayOperationReader(a.state))
-	console.SetRolloutOperationReader(runtimecore.NewSQLiteConsoleRolloutOperationReader(a.state))
+	console.SetReplayOperationReader(runtimecore.NewSQLiteConsoleReplayOperationReader(a.controlState, runtimeControlStateSource(a.settings, "replay-operation-records")))
+	console.SetRolloutOperationReader(runtimecore.NewSQLiteConsoleRolloutOperationReader(a.controlState, runtimeControlStateSource(a.settings, "rollout-operation-records")))
 	console.SetScheduleReader(runtimecore.NewSQLiteConsoleScheduleReader(a.state))
 	console.SetWorkflowReader(runtimecore.NewSQLiteConsoleWorkflowReader(a.state))
-	console.SetAdapterInstanceReader(runtimecore.NewSQLiteConsoleAdapterInstanceReader(a.state))
-	console.SetPluginSnapshotReader(runtimecore.NewSQLiteConsolePluginSnapshotReader(a.state))
-	console.SetPluginEnabledStateReader(runtimecore.NewSQLiteConsolePluginEnabledStateReader(a.state))
-	console.SetPluginConfigReader(runtimecore.NewSQLiteConsolePluginConfigReader(a.state))
+	console.SetAdapterInstanceReader(runtimecore.NewSQLiteConsoleAdapterInstanceReader(a.controlState, runtimeControlStateSource(a.settings, "adapter-instances")))
+	console.SetPluginSnapshotReader(runtimecore.NewSQLiteConsolePluginSnapshotReader(a.controlState, runtimeControlStateSource(a.settings, "plugin-status-snapshot")))
+	console.SetPluginEnabledStateReader(runtimecore.NewSQLiteConsolePluginEnabledStateReader(a.controlState, runtimeControlStateSource(a.settings, "plugin-enabled-overlay")))
+	console.SetPluginConfigReader(runtimecore.NewSQLiteConsolePluginConfigReader(a.controlState, runtimeControlStateSource(a.settings, "plugin-config")))
 	console.SetPluginConfigBindings(a.pluginConfigs.ConsoleBindings())
 	console.SetRecoverySource(newRuntimeRecoverySource(a.queue, a.scheduler))
 	recovery := a.queue.LastRecoverySnapshot()
@@ -1169,23 +1179,23 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	}
 	meta["scheduler_running"] = a.scheduler != nil && a.scheduler.Running()
 	meta["ai_job_dispatcher_registered"] = true
-	meta["adapter_read_model"] = "sqlite-adapter-instances"
+	meta["adapter_read_model"] = runtimeControlStateSource(a.settings, "adapter-instances")
 	meta["adapter_state_persisted"] = true
 	meta["adapter_operator_scope"] = "already-registered adapters only"
 	meta["adapter_status_model"] = "persisted-registered-instance-status"
-	meta["plugin_read_model"] = "runtime-registry+sqlite-plugin-status-snapshot"
-	meta["plugin_config_state_read_model"] = "runtime-registry+sqlite-plugin-config"
+	meta["plugin_read_model"] = "runtime-registry+" + runtimeControlStateSource(a.settings, "plugin-status-snapshot")
+	meta["plugin_config_state_read_model"] = "runtime-registry+" + runtimeControlStateSource(a.settings, "plugin-config")
 	meta["plugin_config_state_kind"] = pluginConfigStateKindPersistedInput
 	meta["plugin_config_state_persisted"] = true
 	meta["plugin_config_operator_actions"] = []string{"/demo/plugins/{plugin-id}/config"}
 	meta["plugin_config_operator_scope"] = "plugins with app-local persisted config bindings only"
-	meta["plugin_enabled_state_read_model"] = "runtime-registry+sqlite-plugin-enabled-overlay"
+	meta["plugin_enabled_state_read_model"] = "runtime-registry+" + runtimeControlStateSource(a.settings, "plugin-enabled-overlay")
 	meta["plugin_enabled_state_persisted"] = true
 	meta["plugin_operator_actions"] = []string{"/demo/plugins/{plugin-id}/enable", "/demo/plugins/{plugin-id}/disable"}
 	meta["plugin_operator_scope"] = "already-registered plugins only"
-	meta["plugin_dispatch_source"] = "sqlite-plugin-status-snapshot+runtime-dispatch-results"
+	meta["plugin_dispatch_source"] = runtimeControlStateSource(a.settings, "plugin-status-snapshot") + "+runtime-dispatch-results"
 	meta["plugin_status_persisted"] = true
-	meta["plugin_status_source"] = "runtime-registry+sqlite-plugin-status-snapshot+runtime-dispatch-results"
+	meta["plugin_status_source"] = "runtime-registry+" + runtimeControlStateSource(a.settings, "plugin-status-snapshot") + "+runtime-dispatch-results"
 	meta["plugin_status_evidence_model"] = "manifest-static-or-last-persisted-plugin-snapshot-with-live-overlay"
 	meta["plugin_dispatch_kind_visibility"] = "last-persisted-or-live-dispatch-kind"
 	meta["plugin_recovery_visibility"] = "last-dispatch-failed|last-dispatch-succeeded|recovered-after-failure|no-runtime-evidence"
@@ -1209,7 +1219,7 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["rbac_manifest_permission_gate_audited"] = false
 	meta["rbac_manifest_permission_gate_boundary"] = "independent dispatch contract check; not part of deny audit taxonomy"
 	meta["rbac_job_target_plugin_filter_boundary"] = "dispatch filter only; not an authorizer entrypoint or deny audit taxonomy item"
-	meta["rbac_snapshot_source"] = "sqlite-rbac-snapshot+sqlite-operator-identities"
+	meta["rbac_snapshot_source"] = runtimeRBACSnapshotSource(a.settings)
 	meta["rbac_snapshot_persisted"] = true
 	meta["rbac_operator_identities_persisted"] = true
 	meta["rbac_snapshot_activation"] = "startup-persist-and-pre-authorize-reload-single-current-snapshot"
@@ -1221,16 +1231,16 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["rbac_console_limitations"] = []string{"console read authorization is optional and only enforced when rbac.console_read_permission is configured", "console read authorization currently reads actor only from the X-Bot-Platform-Actor header", "deny audit taxonomy currently distinguishes only permission_denied and plugin_scope_denied", "manifest permission gate remains a separate dispatch contract check and does not emit deny audit entries", "target_plugin_id remains a dispatch filter, not a global RBAC resource kind", "current slice persists and reloads a single runtime snapshot but does not add login/authn UX or a global resource hierarchy"}
 	meta["replay_policy"] = runtimecore.ReplayPolicy()
 	meta["replay_namespace"] = runtimecore.ReplayPolicy().Namespace
-	meta["replay_record_read_model"] = "sqlite-replay-operation-records"
+	meta["replay_record_read_model"] = runtimeControlStateSource(a.settings, "replay-operation-records")
 	meta["replay_record_persisted"] = true
 	meta["replay_console_limitations"] = []string{"replay policy declaration is read-only and mirrors existing runtime behavior only", "replay remains limited to single-event explicit replay via admin command; no batch replay or dry-run"}
 	meta["secrets_policy"] = runtimecore.SecretPolicy()
 	meta["secrets_provider"] = runtimecore.SecretPolicy().Provider
 	meta["secrets_runtime_owned_ref_prefix"] = runtimecore.SecretPolicy().RefPrefix
 	meta["secrets_console_limitations"] = []string{"secrets policy declaration is read-only and mirrors existing runtime behavior only", "secrets remain limited to env provider and webhook token single-read path; no secret write API, rotation, or console management"}
-	meta["rollout_policy"] = runtimecore.RolloutPolicy()
-	meta["rollout_record_store"] = runtimecore.RolloutPolicy().RecordStore
-	meta["rollout_record_read_model"] = "sqlite-rollout-operation-records"
+	meta["rollout_policy"] = runtimeRolloutPolicy(a.settings)
+	meta["rollout_record_store"] = runtimeRolloutRecordStore(a.settings)
+	meta["rollout_record_read_model"] = runtimeControlStateSource(a.settings, "rollout-operation-records")
 	meta["rollout_record_persisted"] = true
 	meta["rollout_console_limitations"] = []string{"rollout policy declaration is read-only and mirrors existing runtime behavior only", "rollout remains limited to manual /admin prepare|activate with minimal manifest preflight and activate-time drift re-check; no rollback or staged rollout"}
 	meta["log_source"] = "runtime-log-buffer"
@@ -1729,7 +1739,7 @@ func (a *runtimeApp) handlePluginOperator(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), status)
 		return
 	}
-	state, err := a.state.LoadPluginEnabledState(r.Context(), pluginID)
+	state, err := a.controlState.LoadPluginEnabledState(r.Context(), pluginID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1775,7 +1785,7 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := a.state.SavePluginConfig(r.Context(), pluginID, decoded.RawConfigJSON); err != nil {
+	if err := a.controlState.SavePluginConfig(r.Context(), pluginID, decoded.RawConfigJSON); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1794,7 +1804,7 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 		entry.Reason = "plugin_config_updated"
 		_ = a.auditRecorder.RecordAudit(entry)
 	}
-	stored, err := a.state.LoadPluginConfig(r.Context(), pluginID)
+	stored, err := a.controlState.LoadPluginConfig(r.Context(), pluginID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2003,9 +2013,31 @@ func (a *runtimeApp) runtimeStateCounts(ctx context.Context) (map[string]int, er
 		return nil, err
 	}
 	if a.smokeStore == nil {
+		if a.controlState != nil {
+			controlCounts, err := a.controlState.Counts(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("load %s control counts: %w", runtimeControlBackend(a.settings), err)
+			}
+			for _, key := range runtimeControlCountKeys() {
+				if value, ok := controlCounts[key]; ok {
+					counts[key] = value
+				}
+			}
+		}
 		return counts, nil
 	}
 	if _, ok := a.smokeStore.(sqliteRuntimeSmokeStore); ok {
+		if a.controlState != nil {
+			controlCounts, err := a.controlState.Counts(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("load %s control counts: %w", runtimeControlBackend(a.settings), err)
+			}
+			for _, key := range runtimeControlCountKeys() {
+				if value, ok := controlCounts[key]; ok {
+					counts[key] = value
+				}
+			}
+		}
 		return counts, nil
 	}
 	smokeCounts, err := a.smokeStore.Counts(ctx)
@@ -2014,6 +2046,17 @@ func (a *runtimeApp) runtimeStateCounts(ctx context.Context) (map[string]int, er
 	}
 	counts["event_journal"] = smokeCounts["event_journal"]
 	counts["idempotency_keys"] = smokeCounts["idempotency_keys"]
+	if a.controlState != nil {
+		controlCounts, err := a.controlState.Counts(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load %s control counts: %w", runtimeControlBackend(a.settings), err)
+		}
+		for _, key := range runtimeControlCountKeys() {
+			if value, ok := controlCounts[key]; ok {
+				counts[key] = value
+			}
+		}
+	}
 	return counts, nil
 }
 
