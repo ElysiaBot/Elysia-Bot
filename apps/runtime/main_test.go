@@ -39,6 +39,23 @@ func writeTestConfigAt(t *testing.T, dir string) string {
 	return path
 }
 
+func writeTestConfigWithTraceExporterAt(t *testing.T, dir string, enabled bool, kind string, endpoint string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.yaml")
+	content := "runtime:\n  environment: test\n  log_level: debug\n  http_port: 18080\n  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n  scheduler_interval_ms: 20\n" +
+		"tracing:\n" +
+		"  exporter:\n" +
+		"    enabled: " + strconv.FormatBool(enabled) + "\n" +
+		"    kind: " + kind + "\n"
+	if strings.TrimSpace(endpoint) != "" {
+		content += "    endpoint: \"" + strings.ReplaceAll(endpoint, "\"", "\\\"") + "\"\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write trace exporter config: %v", err)
+	}
+	return path
+}
+
 func TestHelperRuntimePluginEchoSubprocess(t *testing.T) {
 	if os.Getenv("GO_WANT_RUNTIME_PLUGIN_ECHO_SUBPROCESS") != "1" {
 		return
@@ -210,6 +227,8 @@ type runtimeHealthTestResponse struct {
 		} `json:"scheduler"`
 	} `json:"components"`
 }
+
+type runtimeTestTraceExporter = runtimecore.InMemoryTraceExporter
 
 func decodeRuntimeHealthResponse(t *testing.T, raw []byte) runtimeHealthTestResponse {
 	t.Helper()
@@ -385,6 +404,14 @@ func readRuntimeConsoleResponse(t *testing.T, app *runtimeApp) runtimeConsoleRes
 	return payload
 }
 
+func exportedTraceSpans(t *testing.T, exporter *runtimeTestTraceExporter, traceID string) []runtimecore.ExportedSpan {
+	t.Helper()
+	if exporter == nil {
+		return nil
+	}
+	return exporter.SpansByTrace(traceID)
+}
+
 func runtimeRoutedPluginHost(t *testing.T, app *runtimeApp) routedPluginHost {
 	t.Helper()
 	host, ok := app.runtime.PluginHost().(routedPluginHost)
@@ -465,6 +492,101 @@ func TestRuntimeAppDefaultPluginHostRoutingRoutesPluginEchoThroughSubprocess(t *
 	}
 	if !strings.Contains(stdout, `"callback":"reply_text"`) {
 		t.Fatalf("expected default routing to reply through subprocess callback bridge, stderr=%s stdout=%s", stderr, stdout)
+	}
+}
+
+func TestRuntimeAppTracingExporterDisabledKeepsLocalTraceRecorderMetadata(t *testing.T) {
+	t.Parallel()
+
+	app, err := newRuntimeApp(writeTestConfig(t))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	resp := performRuntimeOneBotMessageRequest(t, app, runtimeDemoOneBotMessageBody(t, 9402, "trace exporter disabled"))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected onebot request 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TraceID string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode onebot response: %v", err)
+	}
+	if payload.TraceID == "" {
+		t.Fatalf("expected trace_id in response, got %s", resp.Body.String())
+	}
+	if rendered := app.tracer.RenderTrace(payload.TraceID); !strings.Contains(rendered, "reply.send") && !strings.Contains(rendered, "runtime.dispatch") {
+		t.Fatalf("expected local trace recorder to behave as before, got %s", rendered)
+	}
+	console := readRuntimeConsoleResponse(t, app)
+	if got := consoleMetaString(t, console.Meta, "trace_source"); got != "runtime-trace-recorder" {
+		t.Fatalf("expected default trace_source to remain runtime-trace-recorder, got %q", got)
+	}
+	if enabled, ok := console.Meta["trace_exporter_enabled"].(bool); !ok || enabled {
+		t.Fatalf("expected trace_exporter_enabled=false, got %#v", console.Meta["trace_exporter_enabled"])
+	}
+	if got := consoleMetaString(t, console.Meta, "trace_exporter_kind"); got != "otlp" {
+		t.Fatalf("expected default trace_exporter_kind=otlp, got %q", got)
+	}
+}
+
+func TestRuntimeAppTracingExporterTestSinkReceivesCanonicalSpans(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	exporter := runtimecore.NewInMemoryTraceExporter()
+	app, err := newRuntimeAppWithOptions(writeTestConfigWithTraceExporterAt(t, dir, true, "test", "memory://wave2a"), runtimeAppBuildOptions{
+		traceExporter: exporter,
+	})
+	if err != nil {
+		t.Fatalf("new runtime app with trace exporter: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	resp := performRuntimeOneBotMessageRequest(t, app, runtimeDemoOneBotMessageBody(t, 9403, "trace exporter enabled"))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected onebot request 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TraceID string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode onebot response: %v", err)
+	}
+	spans := exportedTraceSpans(t, exporter, payload.TraceID)
+	if len(spans) == 0 {
+		t.Fatal("expected exporter test sink to receive spans")
+	}
+	var sawRuntimeDispatch bool
+	var sawPluginDispatch bool
+	for _, span := range spans {
+		if span.SpanID == "" || span.TraceID != payload.TraceID {
+			t.Fatalf("expected exported span to carry canonical ids, got %+v", span)
+		}
+		switch span.SpanName {
+		case "runtime.event.dispatch":
+			sawRuntimeDispatch = true
+		case "plugin.dispatch":
+			sawPluginDispatch = true
+		}
+	}
+	if !sawRuntimeDispatch || !sawPluginDispatch {
+		t.Fatalf("expected exported canonical spans runtime.event.dispatch and plugin.dispatch, got %+v", spans)
+	}
+	console := readRuntimeConsoleResponse(t, app)
+	if got := consoleMetaString(t, console.Meta, "trace_source"); got != "runtime-trace-recorder+test-exporter" {
+		t.Fatalf("expected trace_source to advertise dual path, got %q", got)
+	}
+	if enabled, ok := console.Meta["trace_exporter_enabled"].(bool); !ok || !enabled {
+		t.Fatalf("expected trace_exporter_enabled=true, got %#v", console.Meta["trace_exporter_enabled"])
+	}
+	if got := consoleMetaString(t, console.Meta, "trace_exporter_kind"); got != "test" {
+		t.Fatalf("expected trace_exporter_kind=test, got %q", got)
+	}
+	if rendered := app.tracer.RenderTrace(payload.TraceID); !strings.Contains(rendered, "runtime.dispatch") {
+		t.Fatalf("expected local trace recorder path to remain available, got %s", rendered)
 	}
 }
 

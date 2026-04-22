@@ -49,6 +49,9 @@ func TestLoadConfigReadsYAMLAndAppliesEnvOverride(t *testing.T) {
 	t.Setenv("BOT_PLATFORM_RUNTIME_HTTP_PORT", "9090")
 	t.Setenv("BOT_PLATFORM_RUNTIME_SMOKE_STORE_BACKEND", "postgres")
 	t.Setenv("BOT_PLATFORM_RUNTIME_POSTGRES_DSN", "postgres://runtime:test@localhost/runtime_test?sslmode=disable")
+	t.Setenv("BOT_PLATFORM_TRACING_EXPORTER_ENABLED", "true")
+	t.Setenv("BOT_PLATFORM_TRACING_EXPORTER_KIND", "test")
+	t.Setenv("BOT_PLATFORM_TRACING_EXPORTER_ENDPOINT", "memory://active2")
 
 	configPath := filepath.Join("..", "..", "deploy", "config.dev.yaml")
 	cfg, err := LoadConfig(configPath)
@@ -63,8 +66,33 @@ func TestLoadConfigReadsYAMLAndAppliesEnvOverride(t *testing.T) {
 	if cfg.Runtime.SmokeStoreBackend != "postgres" || cfg.Runtime.PostgresDSN != "postgres://runtime:test@localhost/runtime_test?sslmode=disable" {
 		t.Fatalf("expected smoke store env override to win, got %+v", cfg.Runtime)
 	}
+	if !cfg.Tracing.Exporter.Enabled || cfg.Tracing.Exporter.Kind != "test" || cfg.Tracing.Exporter.Endpoint != "memory://active2" {
+		t.Fatalf("expected tracing exporter env override to win, got %+v", cfg.Tracing)
+	}
 	if cfg.Secrets.WebhookTokenRef != contract.DefaultDevRef {
 		t.Fatalf("expected secret ref to load from yaml, got %+v", cfg.Secrets)
+	}
+}
+
+func TestLoadConfigDefaultsTracingExporterDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := []byte("runtime:\n  environment: development\n  log_level: debug\n  http_port: 8080\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Tracing.Exporter.Enabled {
+		t.Fatalf("expected tracing exporter disabled by default, got %+v", cfg.Tracing)
+	}
+	if cfg.Tracing.Exporter.Kind != "otlp" {
+		t.Fatalf("expected default tracing exporter kind otlp, got %+v", cfg.Tracing)
 	}
 }
 

@@ -61,6 +61,13 @@ type appRuntimeSettings struct {
 	PostgresDSN         string
 	SchedulerIntervalMs int
 	BotInstances        []runtimecore.RuntimeBotInstance
+	TraceExporter       appTraceExporterSettings
+}
+
+type appTraceExporterSettings struct {
+	Enabled  bool
+	Kind     string
+	Endpoint string
 }
 
 type runtimeSmokeStore interface {
@@ -551,6 +558,13 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 	logs := &logBuffer{}
 	logger := runtimecore.NewLogger(io.MultiWriter(output, logs))
 	tracer := runtimecore.NewTraceRecorder()
+	traceExporter := options.traceExporter
+	if traceExporter == nil {
+		traceExporter = buildRuntimeTraceExporter(settings)
+	}
+	if traceExporter != nil {
+		tracer.SetExporter(traceExporter)
+	}
 	metrics := runtimecore.NewMetricsRegistry()
 	replies := newReplyBuffer(logger, tracer)
 	audits := runtimecore.NewInMemoryAuditLog()
@@ -801,6 +815,8 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 			"ai_chat_provider":        config.AIChat.Provider,
 			"runtime_worker_id":       runtimeWorkerID(),
 			"console_mode":            "read+operator-plugin-enable-disable+plugin-config+job-retry+schedule-cancel",
+			"trace_exporter_enabled":  tracer.ExporterEnabled(),
+			"trace_exporter_kind":     settings.TraceExporter.Kind,
 		},
 		mux: http.NewServeMux(),
 	}
@@ -1040,7 +1056,7 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["rollout_record_persisted"] = true
 	meta["rollout_console_limitations"] = []string{"rollout policy declaration is read-only and mirrors existing runtime behavior only", "rollout remains limited to manual /admin prepare|activate with minimal manifest preflight and activate-time drift re-check; no rollback or staged rollout"}
 	meta["log_source"] = "runtime-log-buffer"
-	meta["trace_source"] = "runtime-trace-recorder"
+	meta["trace_source"] = runtimeTraceSource(a.tracer, a.settings)
 	meta["metrics_source"] = "runtime-metrics-registry"
 	meta["job_read_model"] = "sqlite"
 	meta["job_status_source"] = "sqlite-jobs"
@@ -2004,6 +2020,11 @@ func loadAppRuntimeSettings(cfg runtimecore.Config) appRuntimeSettings {
 		PostgresDSN:         strings.TrimSpace(cfg.Runtime.PostgresDSN),
 		SchedulerIntervalMs: cfg.Runtime.SchedulerIntervalMs,
 		BotInstances:        append([]runtimecore.RuntimeBotInstance(nil), cfg.Runtime.BotInstances...),
+		TraceExporter: appTraceExporterSettings{
+			Enabled:  cfg.Tracing.Exporter.Enabled,
+			Kind:     strings.ToLower(strings.TrimSpace(cfg.Tracing.Exporter.Kind)),
+			Endpoint: strings.TrimSpace(cfg.Tracing.Exporter.Endpoint),
+		},
 	}
 	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_RUNTIME_SQLITE_PATH")); value != "" {
 		settings.SQLitePath = value
@@ -2019,6 +2040,17 @@ func loadAppRuntimeSettings(cfg runtimecore.Config) appRuntimeSettings {
 			settings.SchedulerIntervalMs = interval
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_ENABLED")); value != "" {
+		if enabled, convErr := strconv.ParseBool(value); convErr == nil {
+			settings.TraceExporter.Enabled = enabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_KIND")); value != "" {
+		settings.TraceExporter.Kind = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_ENDPOINT")); value != "" {
+		settings.TraceExporter.Endpoint = value
+	}
 	if settings.SQLitePath == "" {
 		settings.SQLitePath = "data/dev/runtime.sqlite"
 	}
@@ -2028,7 +2060,33 @@ func loadAppRuntimeSettings(cfg runtimecore.Config) appRuntimeSettings {
 	if settings.SchedulerIntervalMs <= 0 {
 		settings.SchedulerIntervalMs = 100
 	}
+	if settings.TraceExporter.Kind == "" {
+		settings.TraceExporter.Kind = "otlp"
+	}
 	return settings
+}
+
+func buildRuntimeTraceExporter(settings appRuntimeSettings) runtimecore.TraceExporter {
+	if !settings.TraceExporter.Enabled {
+		return nil
+	}
+	switch settings.TraceExporter.Kind {
+	case "", "otlp", "test", "memory":
+		return runtimecore.NewInMemoryTraceExporter()
+	default:
+		return nil
+	}
+}
+
+func runtimeTraceSource(tracer *runtimecore.TraceRecorder, settings appRuntimeSettings) string {
+	if tracer == nil || !tracer.ExporterEnabled() {
+		return "runtime-trace-recorder"
+	}
+	kind := strings.TrimSpace(settings.TraceExporter.Kind)
+	if kind == "" {
+		kind = "otlp"
+	}
+	return "runtime-trace-recorder+" + kind + "-exporter"
 }
 
 func runtimeWorkerID() string {

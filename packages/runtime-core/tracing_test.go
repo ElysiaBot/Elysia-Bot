@@ -68,3 +68,63 @@ func TestTraceRecorderSpanCarriesFiveIDContext(t *testing.T) {
 		t.Fatalf("expected five-ID span context to round-trip, got %+v", span)
 	}
 }
+
+func TestTraceRecorderExporterDisabledPreservesLocalRecorderBehavior(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewTraceRecorder()
+	finish := recorder.StartSpan("trace-local-only", "runtime.dispatch", "evt-local-only", "", "run-local-only", "corr-local-only", map[string]any{"dispatch_kind": "event"})
+	finish()
+
+	if recorder.ExporterEnabled() {
+		t.Fatal("expected exporter to be disabled by default")
+	}
+	spans := recorder.SpansByTrace("trace-local-only")
+	if len(spans) != 1 {
+		t.Fatalf("expected one local span, got %d", len(spans))
+	}
+	if spans[0].SpanName != "runtime.dispatch" {
+		t.Fatalf("expected local span name to remain unchanged, got %q", spans[0].SpanName)
+	}
+	if rendered := recorder.RenderTrace("trace-local-only"); !strings.Contains(rendered, "runtime.dispatch") {
+		t.Fatalf("expected local rendered trace to keep existing span name, got %s", rendered)
+	}
+}
+
+func TestTraceRecorderExporterReceivesCanonicalSpanNamesAndIDs(t *testing.T) {
+	t.Parallel()
+
+	recorder := NewTraceRecorder()
+	exporter := NewInMemoryTraceExporter()
+	recorder.SetExporter(exporter)
+
+	finishDispatch := recorder.StartSpan("trace-export", "runtime.dispatch", "evt-export", "", "run-export", "corr-export", map[string]any{"dispatch_kind": "event"})
+	finishDispatch()
+	finishPlugin := recorder.StartSpan("trace-export", "plugin.invoke", "evt-export", "plugin-echo", "run-export", "corr-export", map[string]any{"dispatch_kind": "event", "parent_span_name": "runtime.dispatch"})
+	finishPlugin()
+
+	spans := exporter.SpansByTrace("trace-export")
+	if len(spans) != 2 {
+		t.Fatalf("expected two exported spans, got %d", len(spans))
+	}
+	if spans[0].SpanName != "runtime.event.dispatch" {
+		t.Fatalf("expected canonical runtime span name, got %+v", spans[0])
+	}
+	if spans[1].SpanName != "plugin.dispatch" {
+		t.Fatalf("expected canonical plugin span name, got %+v", spans[1])
+	}
+	for _, span := range spans {
+		if span.TraceID != "trace-export" || span.EventID != "evt-export" || span.RunID != "run-export" || span.CorrelationID != "corr-export" {
+			t.Fatalf("expected exported span to retain canonical IDs, got %+v", span)
+		}
+		if span.SpanID == "" {
+			t.Fatalf("expected exported span id, got %+v", span)
+		}
+	}
+	if spans[1].ParentSpanID == "" {
+		t.Fatalf("expected plugin span to carry parent span id, got %+v", spans[1])
+	}
+	if spans[1].PluginID != "plugin-echo" {
+		t.Fatalf("expected exported plugin id to round-trip, got %+v", spans[1])
+	}
+}

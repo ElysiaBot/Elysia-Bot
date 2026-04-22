@@ -19,6 +19,7 @@ import (
 
 type runtimeAppBuildOptions struct {
 	pluginHostFactory func(*replyBuffer, *runtimecore.WorkflowRuntime) runtimecore.PluginHost
+	traceExporter     runtimecore.TraceExporter
 }
 
 type runtimeSubprocessLauncherConfig struct {

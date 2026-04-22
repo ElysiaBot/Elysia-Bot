@@ -15,6 +15,7 @@ import (
 
 type Config struct {
 	Runtime RuntimeConfig `yaml:"runtime"`
+	Tracing TracingConfig `yaml:"tracing,omitempty"`
 	AIChat  AIChatConfig  `yaml:"ai_chat,omitempty"`
 	Secrets SecretsConfig `yaml:"secrets,omitempty"`
 	RBAC    *RBACConfig   `yaml:"rbac,omitempty"`
@@ -39,6 +40,16 @@ type RuntimeBotInstance struct {
 	Path     string `yaml:"path,omitempty"`
 	DemoPath string `yaml:"demo_path,omitempty"`
 	SelfID   int64  `yaml:"self_id,omitempty"`
+}
+
+type TracingConfig struct {
+	Exporter TracingExporterConfig `yaml:"exporter,omitempty"`
+}
+
+type TracingExporterConfig struct {
+	Enabled  bool   `yaml:"enabled,omitempty"`
+	Kind     string `yaml:"kind,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty"`
 }
 
 type AIChatConfig struct {
@@ -157,6 +168,18 @@ func applyEnvOverride(cfg *Config) {
 			cfg.Runtime.SchedulerIntervalMs = interval
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Tracing.Exporter.Enabled = enabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_KIND")); value != "" {
+		cfg.Tracing.Exporter.Kind = value
+	}
+	if value := strings.TrimSpace(os.Getenv("BOT_PLATFORM_TRACING_EXPORTER_ENDPOINT")); value != "" {
+		cfg.Tracing.Exporter.Endpoint = value
+	}
 }
 
 func applyRuntimeDefaults(cfg *Config) {
@@ -179,6 +202,11 @@ func applyRuntimeDefaults(cfg *Config) {
 	}
 	if cfg.Runtime.SchedulerIntervalMs <= 0 {
 		cfg.Runtime.SchedulerIntervalMs = 100
+	}
+	cfg.Tracing.Exporter.Kind = strings.ToLower(strings.TrimSpace(cfg.Tracing.Exporter.Kind))
+	cfg.Tracing.Exporter.Endpoint = strings.TrimSpace(cfg.Tracing.Exporter.Endpoint)
+	if cfg.Tracing.Exporter.Kind == "" {
+		cfg.Tracing.Exporter.Kind = "otlp"
 	}
 	for index := range cfg.Runtime.BotInstances {
 		cfg.Runtime.BotInstances[index].ID = strings.TrimSpace(cfg.Runtime.BotInstances[index].ID)

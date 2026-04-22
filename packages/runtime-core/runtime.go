@@ -893,7 +893,7 @@ func (r *InMemoryRuntime) dispatchToPluginsWithFilter(
 		}
 
 		invokeStarted := time.Now()
-		finishInvokeSpan := r.tracer.StartSpan(executionContext.TraceID, "plugin.invoke", executionContext.EventID, manifest.ID, executionContext.RunID, executionContext.CorrelationID, mergeFields(fields, map[string]any{"dispatch_kind": dispatchKind}))
+		finishInvokeSpan := r.tracer.StartSpan(executionContext.TraceID, "plugin.invoke", executionContext.EventID, manifest.ID, executionContext.RunID, executionContext.CorrelationID, mergeFields(fields, map[string]any{"dispatch_kind": dispatchKind, "parent_span_name": "runtime.dispatch"}))
 		r.log("info", "plugin dispatch started", logContextFromExecutionContext(executionContext), mergeFields(fields, map[string]any{"dispatch_kind": dispatchKind}))
 
 		if err := r.supervisor.EnsurePlugin(ctx, manifest.ID); err != nil {
