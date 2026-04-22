@@ -2,16 +2,22 @@ package runtimecore
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
 
 type PluginLifecycleService struct {
-	store *SQLiteStateStore
+	store interface {
+		PluginManifestStateStore
+		PluginEnabledStateStore
+	}
 }
 
-func NewPluginLifecycleService(store *SQLiteStateStore) *PluginLifecycleService {
+func NewPluginLifecycleService(store interface {
+	PluginManifestStateStore
+	PluginEnabledStateStore
+}) *PluginLifecycleService {
 	return &PluginLifecycleService{store: store}
 }
 
@@ -38,7 +44,7 @@ func (s *PluginLifecycleService) PluginEnabled(pluginID string) bool {
 	if err == nil {
 		return state.Enabled
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, errStateStoreNoRows) {
 		return true
 	}
 	return true
@@ -53,7 +59,7 @@ func (s *PluginLifecycleService) setEnabled(pluginID string, enabled bool) error
 		return fmt.Errorf("plugin enabled state store is required")
 	}
 	if _, err := s.store.LoadPluginManifest(context.Background(), pluginID); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, errStateStoreNoRows) {
 			return fmt.Errorf("plugin %q is not registered", pluginID)
 		}
 		return fmt.Errorf("load plugin manifest: %w", err)

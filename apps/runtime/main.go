@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,94 @@ type runtimeSmokeStore interface {
 
 type runtimeEventDispatcher interface {
 	DispatchEvent(context.Context, eventmodel.Event) error
+}
+
+type runtimeAuditLogReader interface {
+	AuditEntries() []pluginsdk.AuditEntry
+}
+
+type runtimeAuditRecorder interface {
+	RecordAudit(entry pluginsdk.AuditEntry) error
+}
+
+type runtimeAuditEntriesReader interface {
+	AuditEntries() []pluginsdk.AuditEntry
+}
+
+type sqliteRuntimeAuditRecorder struct {
+	store *runtimecore.SQLiteStateStore
+}
+
+func (r sqliteRuntimeAuditRecorder) RecordAudit(entry pluginsdk.AuditEntry) error {
+	if r.store == nil {
+		return nil
+	}
+	method := reflect.ValueOf(r.store).MethodByName("SaveAudit")
+	if !method.IsValid() {
+		method = reflect.ValueOf(r.store).MethodByName("RecordAudit")
+		if !method.IsValid() {
+			return fmt.Errorf("sqlite audit recorder method unavailable")
+		}
+		results := method.Call([]reflect.Value{reflect.ValueOf(entry)})
+		if len(results) == 1 && !results[0].IsNil() {
+			return results[0].Interface().(error)
+		}
+		return nil
+	}
+	results := method.Call([]reflect.Value{reflect.ValueOf(context.Background()), reflect.ValueOf(entry)})
+	if len(results) == 1 && !results[0].IsNil() {
+		return results[0].Interface().(error)
+	}
+	return nil
+}
+
+type sqliteRuntimeAuditEntriesReader struct {
+	store *runtimecore.SQLiteStateStore
+}
+
+func (r sqliteRuntimeAuditEntriesReader) AuditEntries() []pluginsdk.AuditEntry {
+	if r.store == nil {
+		return nil
+	}
+	method := reflect.ValueOf(r.store).MethodByName("ListAudits")
+	if method.IsValid() {
+		results := method.Call([]reflect.Value{reflect.ValueOf(context.Background())})
+		if len(results) == 2 {
+			if !results[1].IsNil() {
+				return nil
+			}
+			entries, _ := results[0].Interface().([]pluginsdk.AuditEntry)
+			return entries
+		}
+	}
+	method = reflect.ValueOf(r.store).MethodByName("AuditEntries")
+	if method.IsValid() {
+		results := method.Call(nil)
+		if len(results) == 1 {
+			entries, _ := results[0].Interface().([]pluginsdk.AuditEntry)
+			return entries
+		}
+	}
+	return nil
+}
+
+type runtimeAuditLog struct {
+	recorder runtimeAuditRecorder
+	reader   runtimeAuditEntriesReader
+}
+
+func (l runtimeAuditLog) RecordAudit(entry pluginsdk.AuditEntry) error {
+	if l.recorder == nil {
+		return nil
+	}
+	return l.recorder.RecordAudit(entry)
+}
+
+func (l runtimeAuditLog) AuditEntries() []pluginsdk.AuditEntry {
+	if l.reader == nil {
+		return nil
+	}
+	return l.reader.AuditEntries()
 }
 
 type runtimeServeFunc func(string, http.Handler) error
@@ -186,6 +275,86 @@ func (s sqliteRuntimeSmokeStore) Close() error {
 
 type postgresRuntimeSmokeStore struct {
 	store *runtimecore.PostgresStore
+}
+
+type runtimeAuditRecorderSlice struct {
+	recorders []runtimeAuditRecorder
+}
+
+func newRuntimeAuditRecorder(recorders ...runtimeAuditRecorder) runtimecore.AuditRecorder {
+	filtered := make([]runtimeAuditRecorder, 0, len(recorders))
+	for _, recorder := range recorders {
+		if recorder != nil {
+			filtered = append(filtered, recorder)
+		}
+	}
+	return runtimeAuditRecorderSlice{recorders: filtered}
+}
+
+func (m runtimeAuditRecorderSlice) RecordAudit(entry pluginsdk.AuditEntry) error {
+	var errs []error
+	for _, recorder := range m.recorders {
+		if err := recorder.RecordAudit(entry); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func recordAuthorizationDeniedAuditWithContext(recorder runtimecore.AuditRecorder, executionContext eventmodel.ExecutionContext, actor, permission, target string, err error) {
+	if recorder == nil || err == nil || strings.TrimSpace(permission) == "" || strings.TrimSpace(target) == "" {
+		return
+	}
+	reason := authorizationDeniedAuditReason(err)
+	entry := pluginsdk.AuditEntry{
+		Actor:         actor,
+		Permission:    permission,
+		Action:        strings.ReplaceAll(permission, ":", "."),
+		Target:        target,
+		Allowed:       false,
+		ErrorCategory: "authorization",
+		ErrorCode:     reason,
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	executionContext = normalizeRuntimeExecutionContext(executionContext)
+	if strings.TrimSpace(entry.TraceID) == "" {
+		entry.TraceID = strings.TrimSpace(executionContext.TraceID)
+	}
+	if strings.TrimSpace(entry.EventID) == "" {
+		entry.EventID = strings.TrimSpace(executionContext.EventID)
+	}
+	if strings.TrimSpace(entry.PluginID) == "" {
+		entry.PluginID = strings.TrimSpace(executionContext.PluginID)
+	}
+	if strings.TrimSpace(entry.RunID) == "" {
+		entry.RunID = strings.TrimSpace(executionContext.RunID)
+	}
+	if strings.TrimSpace(entry.CorrelationID) == "" {
+		entry.CorrelationID = strings.TrimSpace(executionContext.CorrelationID)
+	}
+	entry.Reason = reason
+	_ = recorder.RecordAudit(entry)
+}
+
+func authorizationDeniedAuditReason(err error) string {
+	if err == nil {
+		return "permission_denied"
+	}
+	switch strings.TrimSpace(strings.ToLower(err.Error())) {
+	case "plugin scope denied":
+		return "plugin_scope_denied"
+	default:
+		return "permission_denied"
+	}
+}
+
+func normalizeRuntimeExecutionContext(ctx eventmodel.ExecutionContext) eventmodel.ExecutionContext {
+	ctx.TraceID = strings.TrimSpace(ctx.TraceID)
+	ctx.EventID = strings.TrimSpace(ctx.EventID)
+	ctx.PluginID = strings.TrimSpace(ctx.PluginID)
+	ctx.RunID = strings.TrimSpace(ctx.RunID)
+	ctx.CorrelationID = strings.TrimSpace(ctx.CorrelationID)
+	return ctx
 }
 
 func (s postgresRuntimeSmokeStore) RecordEvent(ctx context.Context, event eventmodel.Event) error {
@@ -630,7 +799,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 		host.SetObservability(logger, tracer, metrics)
 	}
 	runtime.SetObservability(logger, tracer, metrics)
-	persistedAuditRecorder := runtimecore.NewMultiAuditRecorder(inMemoryAudits, state)
+	persistedAuditRecorder := newRuntimeAuditRecorder(inMemoryAudits, sqliteRuntimeAuditRecorder{store: state})
 	runtime.SetAuditRecorder(persistedAuditRecorder)
 	runtime.SetDispatchRecorder(state)
 	lifecycle := runtimecore.NewPluginLifecycleService(state)
@@ -977,7 +1146,7 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	consoleAudits := runtimecore.NewJoinedAuditLog(a.auditRecorder, a.state)
+	consoleAudits := runtimeAuditLog{recorder: a.auditRecorder, reader: sqliteRuntimeAuditEntriesReader{store: a.state}}
 	console := runtimecore.NewConsoleAPI(a.runtimeRaw, a.queue, a.config, a.logs.Lines(), consoleAudits)
 	console.SetCurrentAuthorizerProvider(a.authorizer)
 	console.SetJobReader(runtimecore.NewSQLiteConsoleJobReader(a.state))
@@ -1258,7 +1427,7 @@ func (a *runtimeApp) handleJobOperator(w http.ResponseWriter, r *http.Request) {
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	permission := jobOperatorPermission(action)
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, permission, jobID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{}, actor, permission, jobID, err)
+		recordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{}, actor, permission, jobID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1452,7 +1621,7 @@ func (a *runtimeApp) handleScheduleOperator(w http.ResponseWriter, r *http.Reque
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	permission := scheduleOperatorPermission(action)
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, permission, scheduleID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{CorrelationID: scheduleID}, actor, permission, scheduleID, err)
+		recordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{CorrelationID: scheduleID}, actor, permission, scheduleID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1592,7 +1761,7 @@ func (a *runtimeApp) handlePluginConfigOperator(w http.ResponseWriter, r *http.R
 	}
 	actor := strings.TrimSpace(r.Header.Get(runtimecore.ConsoleReadActorHeader))
 	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, pluginConfigPermission, pluginID); err != nil {
-		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{PluginID: pluginID, CorrelationID: pluginID}, actor, pluginConfigPermission, pluginID, err)
+		recordAuthorizationDeniedAuditWithContext(a.auditRecorder, eventmodel.ExecutionContext{PluginID: pluginID, CorrelationID: pluginID}, actor, pluginConfigPermission, pluginID, err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}

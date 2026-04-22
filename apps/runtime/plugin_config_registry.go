@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,10 @@ import (
 	runtimecore "github.com/ohmyopencode/bot-platform/packages/runtime-core"
 	pluginecho "github.com/ohmyopencode/bot-platform/plugins/plugin-echo"
 )
+
+type runtimePluginConfigStateStore interface {
+	LoadPluginConfig(context.Context, string) (runtimecore.PluginConfigState, error)
+}
 
 const pluginConfigStateKindPersistedInput = "plugin-owned-persisted-input"
 
@@ -107,12 +110,12 @@ func (b appPluginConfigBinding) Decode(raw []byte) (decodedAppPluginConfig, erro
 	}, nil
 }
 
-func loadPersistedPluginConfig(state *runtimecore.SQLiteStateStore, binding appPluginConfigBinding) (loadedAppPluginConfig, error) {
+func loadPersistedPluginConfig(state runtimePluginConfigStateStore, binding appPluginConfigBinding) (loadedAppPluginConfig, error) {
 	if state == nil {
 		return loadedAppPluginConfig{TypedConfig: binding.DefaultTypedConfig}, nil
 	}
 	stored, err := state.LoadPluginConfig(context.Background(), binding.PluginID)
-	if err == sql.ErrNoRows {
+	if isRuntimeStoreNoRows(err) {
 		return loadedAppPluginConfig{TypedConfig: binding.DefaultTypedConfig}, nil
 	}
 	if err != nil {
@@ -123,6 +126,14 @@ func loadPersistedPluginConfig(state *runtimecore.SQLiteStateStore, binding appP
 		return loadedAppPluginConfig{}, err
 	}
 	return loadedAppPluginConfig{TypedConfig: decoded.TypedConfig, InstanceConfig: decoded.InstanceConfig}, nil
+}
+
+func isRuntimeStoreNoRows(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return errors.Is(err, errors.New("sql: no rows in result set")) || message == "sql: no rows in result set" || message == "no rows in result set"
 }
 
 func validateAndDecodeEchoConfig(raw []byte) (json.RawMessage, map[string]any, pluginecho.Config, error) {

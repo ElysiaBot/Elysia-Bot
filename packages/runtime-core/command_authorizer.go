@@ -2,7 +2,6 @@ package runtimecore
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"reflect"
@@ -394,7 +393,7 @@ func NewCurrentRBACAuthorizerProviderFromConfig(cfg *RBACConfig) *CurrentRBACAut
 	return provider
 }
 
-func NewCurrentRBACAuthorizerProviderFromStore(ctx context.Context, store *SQLiteStateStore) (*CurrentRBACAuthorizerProvider, error) {
+func NewCurrentRBACAuthorizerProviderFromStore(ctx context.Context, store RBACStateStore) (*CurrentRBACAuthorizerProvider, error) {
 	provider := NewCurrentRBACAuthorizerProvider()
 	if err := provider.ReloadFromStore(ctx, store); err != nil {
 		return nil, err
@@ -428,16 +427,16 @@ func (p *CurrentRBACAuthorizerProvider) SetSnapshot(snapshot *RBACAuthorizerSnap
 	p.snapshot = snapshot
 }
 
-func (p *CurrentRBACAuthorizerProvider) ReloadFromStore(ctx context.Context, store *SQLiteStateStore) error {
+func (p *CurrentRBACAuthorizerProvider) ReloadFromStore(ctx context.Context, store RBACStateStore) error {
 	if p == nil {
 		return errors.New("current rbac authorizer provider is required")
 	}
 	if store == nil {
-		return errors.New("sqlite state store is required")
+		return errors.New("runtime state store is required")
 	}
 	snapshotState, err := store.LoadRBACSnapshot(ctx, CurrentRBACSnapshotKey)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, errStateStoreNoRows) {
 			p.SetSnapshot(nil)
 			return nil
 		}
@@ -474,7 +473,7 @@ func NewRBACAuthorizerSnapshotFromState(snapshot RBACSnapshotState, identities [
 	return NewRBACAuthorizerSnapshot(actorRoles, snapshot.Policies, snapshot.ConsoleReadPermission)
 }
 
-func PersistConfiguredRBACState(ctx context.Context, store *SQLiteStateStore, cfg *RBACConfig) error {
+func PersistConfiguredRBACState(ctx context.Context, store RBACStateStore, cfg *RBACConfig) error {
 	if cfg == nil || store == nil {
 		return nil
 	}

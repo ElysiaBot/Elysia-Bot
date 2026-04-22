@@ -335,43 +335,54 @@ const (
 )
 
 type sqliteConsoleScheduleReader struct {
-	store *SQLiteStateStore
+	store schedulerStore
 }
 
 type sqliteConsoleAdapterInstanceReader struct {
-	store *SQLiteStateStore
+	store AdapterInstanceStateStore
+	source string
 }
 
 type sqliteConsolePluginSnapshotReader struct {
-	store *SQLiteStateStore
+	store PluginStatusSnapshotStore
+	source string
 }
 
 type sqliteConsolePluginEnabledStateReader struct {
-	store *SQLiteStateStore
+	store PluginEnabledStateStore
+	source string
 }
 
 type sqliteConsolePluginConfigReader struct {
-	store *SQLiteStateStore
+	store PluginConfigStateStore
+	source string
 }
 
 type sqliteConsoleJobReader struct {
-	store *SQLiteStateStore
+	store jobQueueStore
 }
 
 type sqliteConsoleWorkflowReader struct {
-	store *SQLiteStateStore
+	store workflowRuntimeStore
+	source string
 }
 
 type sqliteConsoleAlertReader struct {
-	store *SQLiteStateStore
+	store interface {
+		ListAlerts(context.Context) ([]AlertRecord, error)
+	}
 }
 
 type sqliteConsoleReplayOperationReader struct {
-	store *SQLiteStateStore
+	store ReplayOperationStateStore
+	source string
 }
 
 type sqliteConsoleRolloutOperationReader struct {
-	store *SQLiteStateStore
+	store interface {
+		ListRolloutOperationRecords(context.Context) ([]RolloutOperationRecord, error)
+	}
+	source string
 }
 
 type RuntimeStatus struct {
@@ -386,74 +397,78 @@ func NewConsoleAPI(runtime *InMemoryRuntime, queue *JobQueue, config Config, log
 	return &ConsoleAPI{runtime: runtime, queue: queue, config: config, logs: logs, audits: audits, meta: map[string]any{}, pluginConfigMeta: map[string]ConsolePluginConfigBinding{}, authorizerSource: provider, readAuthorizer: NewCurrentConsoleReadAuthorizer(provider)}
 }
 
-func NewSQLiteConsoleJobReader(store *SQLiteStateStore) consoleJobReader {
+func NewSQLiteConsoleJobReader(store jobQueueStore) consoleJobReader {
 	if store == nil {
 		return nil
 	}
 	return sqliteConsoleJobReader{store: store}
 }
 
-func NewSQLiteConsoleAlertReader(store *SQLiteStateStore) consoleAlertReader {
+func NewSQLiteConsoleAlertReader(store interface {
+	ListAlerts(context.Context) ([]AlertRecord, error)
+}) consoleAlertReader {
 	if store == nil {
 		return nil
 	}
 	return sqliteConsoleAlertReader{store: store}
 }
 
-func NewSQLiteConsoleReplayOperationReader(store *SQLiteStateStore) consoleReplayOperationReader {
+func NewSQLiteConsoleReplayOperationReader(store ReplayOperationStateStore, source ...string) consoleReplayOperationReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsoleReplayOperationReader{store: store}
+	return sqliteConsoleReplayOperationReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-replay-operation-records")}
 }
 
-func NewSQLiteConsoleRolloutOperationReader(store *SQLiteStateStore) consoleRolloutOperationReader {
+func NewSQLiteConsoleRolloutOperationReader(store interface {
+	ListRolloutOperationRecords(context.Context) ([]RolloutOperationRecord, error)
+}, source ...string) consoleRolloutOperationReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsoleRolloutOperationReader{store: store}
+	return sqliteConsoleRolloutOperationReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-rollout-operation-records")}
 }
 
-func NewSQLiteConsoleScheduleReader(store *SQLiteStateStore) consoleScheduleReader {
+func NewSQLiteConsoleScheduleReader(store schedulerStore) consoleScheduleReader {
 	if store == nil {
 		return nil
 	}
 	return sqliteConsoleScheduleReader{store: store}
 }
 
-func NewSQLiteConsoleWorkflowReader(store *SQLiteStateStore) consoleWorkflowReader {
+func NewSQLiteConsoleWorkflowReader(store workflowRuntimeStore, source ...string) consoleWorkflowReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsoleWorkflowReader{store: store}
+	return sqliteConsoleWorkflowReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-workflow-instances")}
 }
 
-func NewSQLiteConsoleAdapterInstanceReader(store *SQLiteStateStore) consoleAdapterInstanceReader {
+func NewSQLiteConsoleAdapterInstanceReader(store AdapterInstanceStateStore, source ...string) consoleAdapterInstanceReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsoleAdapterInstanceReader{store: store}
+	return sqliteConsoleAdapterInstanceReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-adapter-instances")}
 }
 
-func NewSQLiteConsolePluginSnapshotReader(store *SQLiteStateStore) consolePluginSnapshotReader {
+func NewSQLiteConsolePluginSnapshotReader(store PluginStatusSnapshotStore, source ...string) consolePluginSnapshotReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsolePluginSnapshotReader{store: store}
+	return sqliteConsolePluginSnapshotReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-plugin-status-snapshot")}
 }
 
-func NewSQLiteConsolePluginEnabledStateReader(store *SQLiteStateStore) consolePluginEnabledStateReader {
+func NewSQLiteConsolePluginEnabledStateReader(store PluginEnabledStateStore, source ...string) consolePluginEnabledStateReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsolePluginEnabledStateReader{store: store}
+	return sqliteConsolePluginEnabledStateReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-plugin-enabled-overlay")}
 }
 
-func NewSQLiteConsolePluginConfigReader(store *SQLiteStateStore) consolePluginConfigReader {
+func NewSQLiteConsolePluginConfigReader(store PluginConfigStateStore, source ...string) consolePluginConfigReader {
 	if store == nil {
 		return nil
 	}
-	return sqliteConsolePluginConfigReader{store: store}
+	return sqliteConsolePluginConfigReader{store: store, source: normalizeConsoleStateSource(firstConsoleStateSource(source...), "sqlite-plugin-config")}
 }
 
 func (c *ConsoleAPI) SetScheduleReader(reader consoleScheduleReader) {
@@ -627,11 +642,15 @@ func toConsolePluginPublish(publish *pluginsdk.PluginPublish) *ConsolePluginPubl
 }
 
 func applyPluginEnabledState(item *ConsolePlugin, state PluginEnabledState) {
+	applyPluginEnabledStateWithSource(item, state, "sqlite-plugin-enabled-overlay")
+}
+
+func applyPluginEnabledStateWithSource(item *ConsolePlugin, state PluginEnabledState, source string) {
 	if item == nil {
 		return
 	}
 	item.Enabled = state.Enabled
-	item.EnabledStateSource = "sqlite-plugin-enabled-overlay"
+	item.EnabledStateSource = normalizeConsoleStateSource(source, "sqlite-plugin-enabled-overlay")
 	item.EnabledStatePersisted = true
 	if !state.UpdatedAt.IsZero() {
 		updatedAt := state.UpdatedAt.UTC()
@@ -651,6 +670,10 @@ func applyPluginConfigBinding(item *ConsolePlugin, binding ConsolePluginConfigBi
 }
 
 func applyPluginConfigState(item *ConsolePlugin, binding ConsolePluginConfigBinding, state PluginConfigState) {
+	applyPluginConfigStateWithSource(item, binding, state, "sqlite-plugin-config")
+}
+
+func applyPluginConfigStateWithSource(item *ConsolePlugin, binding ConsolePluginConfigBinding, state PluginConfigState, source string) {
 	if item == nil {
 		return
 	}
@@ -659,7 +682,7 @@ func applyPluginConfigState(item *ConsolePlugin, binding ConsolePluginConfigBind
 		return
 	}
 	item.ConfigStateKind = stateKind
-	item.ConfigSource = "sqlite-plugin-config"
+	item.ConfigSource = normalizeConsoleStateSource(source, "sqlite-plugin-config")
 	item.ConfigPersisted = true
 	if config := projectConsolePluginConfig(binding, state); len(config) > 0 {
 		item.Config = config
@@ -689,6 +712,10 @@ func projectConsolePluginConfig(binding ConsolePluginConfigBinding, state Plugin
 }
 
 func applyPluginStatusSnapshot(item *ConsolePlugin, snapshot PluginStatusSnapshot) {
+	applyPluginStatusSnapshotWithSource(item, snapshot, "sqlite-plugin-status-snapshot")
+}
+
+func applyPluginStatusSnapshotWithSource(item *ConsolePlugin, snapshot PluginStatusSnapshot, source string) {
 	if item == nil {
 		return
 	}
@@ -708,12 +735,16 @@ func applyPluginStatusSnapshot(item *ConsolePlugin, snapshot PluginStatusSnapsho
 	}
 	item.LastRecoveryFailureCount = snapshot.LastRecoveryFailureCount
 	item.CurrentFailureStreak = snapshot.CurrentFailureStreak
-	item.StatusSource = "runtime-registry+sqlite-plugin-status-snapshot"
+	item.StatusSource = "runtime-registry+" + normalizeConsoleStateSource(source, "sqlite-plugin-status-snapshot")
 	item.RuntimeStateLive = false
 	item.StatusPersisted = true
 }
 
 func applyRuntimeDispatchOverlay(item *ConsolePlugin, dispatch DispatchResult, results []DispatchResult) {
+	applyRuntimeDispatchOverlayWithSource(item, dispatch, results, "sqlite-plugin-status-snapshot")
+}
+
+func applyRuntimeDispatchOverlayWithSource(item *ConsolePlugin, dispatch DispatchResult, results []DispatchResult, source string) {
 	if item == nil {
 		return
 	}
@@ -753,7 +784,7 @@ func applyRuntimeDispatchOverlay(item *ConsolePlugin, dispatch DispatchResult, r
 	}
 	item.RuntimeStateLive = true
 	if item.StatusPersisted {
-		item.StatusSource = "runtime-registry+sqlite-plugin-status-snapshot+runtime-dispatch-results"
+		item.StatusSource = "runtime-registry+" + normalizeConsoleStateSource(source, "sqlite-plugin-status-snapshot") + "+runtime-dispatch-results"
 	} else {
 		item.StatusSource = "runtime-registry+runtime-dispatch-results"
 	}
@@ -783,13 +814,18 @@ func (c *ConsoleAPI) AdapterInstances() ([]ConsoleAdapterInstance, error) {
 		return nil, fmt.Errorf("load console adapter instances: %w", err)
 	}
 	items := make([]ConsoleAdapterInstance, 0, len(states))
+	source := consoleAdapterInstanceSource(c.adapterInstances)
 	for _, state := range states {
-		items = append(items, toConsoleAdapterInstance(state))
+		items = append(items, toConsoleAdapterInstanceWithSource(state, source))
 	}
 	return items, nil
 }
 
 func toConsoleAdapterInstance(state AdapterInstanceState) ConsoleAdapterInstance {
+	return toConsoleAdapterInstanceWithSource(state, "sqlite-adapter-instances")
+}
+
+func toConsoleAdapterInstanceWithSource(state AdapterInstanceState, source string) ConsoleAdapterInstance {
 	config := map[string]any{}
 	if len(state.RawConfig) > 0 && string(state.RawConfig) != "null" {
 		_ = json.Unmarshal(state.RawConfig, &config)
@@ -802,8 +838,8 @@ func toConsoleAdapterInstance(state AdapterInstanceState) ConsoleAdapterInstance
 		Status:         state.Status,
 		Health:         state.Health,
 		Online:         state.Online,
-		StatusSource:   "sqlite-adapter-instances",
-		ConfigSource:   "sqlite-adapter-instances",
+		StatusSource:   normalizeConsoleStateSource(source, "sqlite-adapter-instances"),
+		ConfigSource:   normalizeConsoleStateSource(source, "sqlite-adapter-instances"),
 		StatePersisted: true,
 	}
 	if !state.UpdatedAt.IsZero() {
@@ -1088,6 +1124,7 @@ func (c *ConsoleAPI) ReplayOperations() ([]ConsoleReplayOperation, error) {
 		return nil, fmt.Errorf("load console replay operations: %w", err)
 	}
 	items := make([]ConsoleReplayOperation, 0, len(records))
+	source := consoleReplayOperationSource(c.replayOps)
 	for _, record := range records {
 		item := ConsoleReplayOperation{
 			ReplayID:      record.ReplayID,
@@ -1097,7 +1134,7 @@ func (c *ConsoleAPI) ReplayOperations() ([]ConsoleReplayOperation, error) {
 			Reason:        record.Reason,
 			OccurredAt:    nullableConsoleTime(record.OccurredAt),
 			UpdatedAt:     nullableConsoleTime(record.UpdatedAt),
-			StateSource:   "sqlite-replay-operation-records",
+			StateSource:   source,
 			Persisted:     true,
 		}
 		item.Summary = consoleReplayOperationSummary(item)
@@ -1115,6 +1152,7 @@ func (c *ConsoleAPI) RolloutOperations() ([]ConsoleRolloutOperation, error) {
 		return nil, fmt.Errorf("load console rollout operations: %w", err)
 	}
 	items := make([]ConsoleRolloutOperation, 0, len(records))
+	source := consoleRolloutOperationSource(c.rolloutOps)
 	for _, record := range records {
 		item := ConsoleRolloutOperation{
 			OperationID:      record.OperationID,
@@ -1126,7 +1164,7 @@ func (c *ConsoleAPI) RolloutOperations() ([]ConsoleRolloutOperation, error) {
 			Reason:           record.Reason,
 			OccurredAt:       nullableConsoleTime(record.OccurredAt),
 			UpdatedAt:        nullableConsoleTime(record.UpdatedAt),
-			StateSource:      "sqlite-rollout-operation-records",
+			StateSource:      source,
 			Persisted:        true,
 		}
 		item.Summary = consoleRolloutOperationSummary(item)
@@ -1191,8 +1229,9 @@ func (c *ConsoleAPI) Workflows() ([]ConsoleWorkflow, error) {
 		return nil, fmt.Errorf(`load console workflows: %w`, err)
 	}
 	items := make([]ConsoleWorkflow, 0, len(loaded))
+	source := consoleWorkflowSource(c.workflows)
 	for _, instance := range loaded {
-		items = append(items, toConsoleWorkflow(instance))
+		items = append(items, toConsoleWorkflowWithSource(instance, source))
 	}
 	return items, nil
 }
@@ -1330,6 +1369,10 @@ func (r sqliteConsoleWorkflowReader) ListWorkflowInstances() ([]WorkflowInstance
 }
 
 func toConsoleWorkflow(instance WorkflowInstanceState) ConsoleWorkflow {
+	return toConsoleWorkflowWithSource(instance, `sqlite-workflow-instances`)
+}
+
+func toConsoleWorkflowWithSource(instance WorkflowInstanceState, source string) ConsoleWorkflow {
 	item := ConsoleWorkflow{
 		ID:             instance.WorkflowID,
 		PluginID:       instance.PluginID,
@@ -1345,7 +1388,7 @@ func toConsoleWorkflow(instance WorkflowInstanceState) ConsoleWorkflow {
 		State:          cloneWorkflowStateMap(instance.Workflow.State),
 		LastEventID:    instance.LastEventID,
 		LastEventType:  instance.LastEventType,
-		StatusSource:   `sqlite-workflow-instances`,
+		StatusSource:   normalizeConsoleStateSource(source, `sqlite-workflow-instances`),
 		StatePersisted: true,
 		RuntimeOwner:   `runtime-core`,
 		CreatedAt:      instance.CreatedAt,
@@ -1357,6 +1400,52 @@ func toConsoleWorkflow(instance WorkflowInstanceState) ConsoleWorkflow {
 	}
 	item.Summary = consoleWorkflowSummary(item)
 	return item
+}
+
+func firstConsoleStateSource(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeConsoleStateSource(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func consoleAdapterInstanceSource(reader consoleAdapterInstanceReader) string {
+	if typed, ok := reader.(sqliteConsoleAdapterInstanceReader); ok {
+		return normalizeConsoleStateSource(typed.source, "sqlite-adapter-instances")
+	}
+	return "sqlite-adapter-instances"
+}
+
+func consoleReplayOperationSource(reader consoleReplayOperationReader) string {
+	if typed, ok := reader.(sqliteConsoleReplayOperationReader); ok {
+		return normalizeConsoleStateSource(typed.source, "sqlite-replay-operation-records")
+	}
+	return "sqlite-replay-operation-records"
+}
+
+func consoleRolloutOperationSource(reader consoleRolloutOperationReader) string {
+	if typed, ok := reader.(sqliteConsoleRolloutOperationReader); ok {
+		return normalizeConsoleStateSource(typed.source, "sqlite-rollout-operation-records")
+	}
+	return "sqlite-rollout-operation-records"
+}
+
+func consoleWorkflowSource(reader consoleWorkflowReader) string {
+	if typed, ok := reader.(sqliteConsoleWorkflowReader); ok {
+		return normalizeConsoleStateSource(typed.source, "sqlite-workflow-instances")
+	}
+	return "sqlite-workflow-instances"
 }
 
 func consoleWorkflowSummary(item ConsoleWorkflow) string {
