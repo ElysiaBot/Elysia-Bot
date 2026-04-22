@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
+	"time"
 
+	eventmodel "github.com/ohmyopencode/bot-platform/packages/event-model"
 	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 )
 
@@ -26,6 +29,29 @@ func NewInMemoryAuditLog() *InMemoryAuditLog {
 	return &InMemoryAuditLog{}
 }
 
+type JoinedAuditLog struct {
+	recorder AuditRecorder
+	reader   AuditLogReader
+}
+
+func NewJoinedAuditLog(recorder AuditRecorder, reader AuditLogReader) *JoinedAuditLog {
+	return &JoinedAuditLog{recorder: recorder, reader: reader}
+}
+
+func (l *JoinedAuditLog) RecordAudit(entry pluginsdk.AuditEntry) error {
+	if l == nil || l.recorder == nil {
+		return nil
+	}
+	return l.recorder.RecordAudit(entry)
+}
+
+func (l *JoinedAuditLog) AuditEntries() []pluginsdk.AuditEntry {
+	if l == nil || l.reader == nil {
+		return nil
+	}
+	return l.reader.AuditEntries()
+}
+
 func (l *InMemoryAuditLog) RecordAudit(entry pluginsdk.AuditEntry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -37,6 +63,28 @@ func (l *InMemoryAuditLog) AuditEntries() []pluginsdk.AuditEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return append([]pluginsdk.AuditEntry(nil), l.entries...)
+}
+
+func ApplyAuditExecutionContext(entry *pluginsdk.AuditEntry, ctx eventmodel.ExecutionContext) {
+	if entry == nil {
+		return
+	}
+	ctx = normalizeExecutionContextObservability(ctx)
+	if strings.TrimSpace(entry.TraceID) == "" {
+		entry.TraceID = strings.TrimSpace(ctx.TraceID)
+	}
+	if strings.TrimSpace(entry.EventID) == "" {
+		entry.EventID = strings.TrimSpace(ctx.EventID)
+	}
+	if strings.TrimSpace(entry.PluginID) == "" {
+		entry.PluginID = strings.TrimSpace(ctx.PluginID)
+	}
+	if strings.TrimSpace(entry.RunID) == "" {
+		entry.RunID = strings.TrimSpace(ctx.RunID)
+	}
+	if strings.TrimSpace(entry.CorrelationID) == "" {
+		entry.CorrelationID = strings.TrimSpace(ctx.CorrelationID)
+	}
 }
 
 type PostgresAuditRecorder struct {
@@ -101,4 +149,16 @@ func auditEntryReason(entry pluginsdk.AuditEntry) string {
 		return field.String()
 	}
 	return ""
+}
+
+func parseAuditOccurredAt(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, errors.New("audit occurred_at is required")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err == nil {
+		return parsed, nil
+	}
+	return time.Parse(time.RFC3339, value)
 }

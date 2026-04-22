@@ -70,10 +70,18 @@ CREATE TABLE IF NOT EXISTS idempotency_keys_pg (
 
 CREATE TABLE IF NOT EXISTS audit_log (
   actor TEXT NOT NULL,
+  permission TEXT NOT NULL,
   action TEXT NOT NULL,
   target TEXT NOT NULL,
   allowed BOOLEAN NOT NULL,
   reason TEXT NULL,
+  trace_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  plugin_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  correlation_id TEXT NOT NULL,
+  error_category TEXT NOT NULL,
+  error_code TEXT NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL
 );
 `
@@ -168,11 +176,12 @@ func (s *PostgresStore) SaveIdempotencyKey(ctx context.Context, key, eventID str
 }
 
 func (s *PostgresStore) SaveAudit(ctx context.Context, entry pluginsdk.AuditEntry) error {
-	occurredAt, err := time.Parse(time.RFC3339, entry.OccurredAt)
+	occurredAt, err := parseAuditOccurredAt(entry.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("parse audit occurred_at: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO audit_log (actor, action, target, allowed, reason, occurred_at) VALUES ($1,$2,$3,$4,$5,$6)`, entry.Actor, entry.Action, entry.Target, entry.Allowed, auditEntryReason(entry), occurredAt)
+	_, err = s.pool.Exec(ctx, `INSERT INTO audit_log (actor, permission, action, target, allowed, reason, trace_id, event_id, plugin_id, run_id, correlation_id, error_category, error_code, occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		entry.Actor, entry.Permission, entry.Action, entry.Target, entry.Allowed, auditEntryReason(entry), entry.TraceID, entry.EventID, entry.PluginID, entry.RunID, entry.CorrelationID, entry.ErrorCategory, entry.ErrorCode, occurredAt)
 	return err
 }
 

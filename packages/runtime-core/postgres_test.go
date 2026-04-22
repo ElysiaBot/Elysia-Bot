@@ -95,7 +95,21 @@ func TestPostgresStoreSaveMethodsIssueExpectedWrites(t *testing.T) {
 	job := Job{ID: "job-pg", Type: "ai.chat", Status: JobStatusPending, Payload: map[string]any{"prompt": "hi"}, MaxRetries: 3, Timeout: 30 * time.Second, CreatedAt: time.Date(2026, 4, 6, 10, 1, 0, 0, time.UTC)}
 	workflow := Workflow{ID: "wf-pg", CurrentIndex: 1, WaitingFor: "message.received", Completed: false, Compensated: false, State: map[string]any{"step": "wait"}}
 	manifest := pluginsdk.PluginManifest{ID: "plugin-echo", Name: "Echo Plugin", Version: "0.1.0", APIVersion: "v0", Mode: pluginsdk.ModeSubprocess}
-	audit := pluginsdk.AuditEntry{Actor: "admin-user", Action: "enable", Target: "plugin-echo", Allowed: true, OccurredAt: "2026-04-06T10:02:00Z"}
+	audit := pluginsdk.AuditEntry{
+		Actor:         "admin-user",
+		Permission:    "plugin:enable",
+		Action:        "enable",
+		Target:        "plugin-echo",
+		Allowed:       true,
+		TraceID:       "trace-pg-audit",
+		EventID:       "evt-pg-audit",
+		PluginID:      "plugin-echo",
+		RunID:         "run-pg-audit",
+		CorrelationID: "corr-pg-audit",
+		ErrorCategory: "operator",
+		ErrorCode:     "rollout_prepared",
+		OccurredAt:    "2026-04-06T10:02:00Z",
+	}
 	setAuditEntryReason(&audit, "rollout_prepared")
 
 	if err := store.SaveEvent(ctx, event); err != nil {
@@ -141,7 +155,7 @@ func TestPostgresStoreSaveMethodsIssueExpectedWrites(t *testing.T) {
 	if len(pool.execArgs[4]) != 3 || pool.execArgs[4][0] != "idem-1" || pool.execArgs[4][1] != event.EventID {
 		t.Fatalf("unexpected idempotency exec args %+v", pool.execArgs[4])
 	}
-	if len(pool.execArgs[5]) != 6 || pool.execArgs[5][4] != "rollout_prepared" {
+	if len(pool.execArgs[5]) != 14 || pool.execArgs[5][1] != "plugin:enable" || pool.execArgs[5][5] != "rollout_prepared" || pool.execArgs[5][6] != "trace-pg-audit" || pool.execArgs[5][7] != "evt-pg-audit" || pool.execArgs[5][8] != "plugin-echo" || pool.execArgs[5][9] != "run-pg-audit" || pool.execArgs[5][10] != "corr-pg-audit" || pool.execArgs[5][11] != "operator" || pool.execArgs[5][12] != "rollout_prepared" {
 		t.Fatalf("unexpected audit exec args %+v", pool.execArgs[5])
 	}
 }

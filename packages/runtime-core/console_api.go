@@ -1892,12 +1892,14 @@ func (c *ConsoleAPI) recordConsoleReadDenied(r *http.Request, err error) {
 	}
 	permission := c.currentConsoleReadPermission()
 	entry := pluginsdk.AuditEntry{
-		Actor:      strings.TrimSpace(r.Header.Get(ConsoleReadActorHeader)),
-		Permission: permission,
-		Action:     "console.read",
-		Target:     consoleReadTarget,
-		Allowed:    false,
-		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Actor:         strings.TrimSpace(r.Header.Get(ConsoleReadActorHeader)),
+		Permission:    permission,
+		Action:        "console.read",
+		Target:        consoleReadTarget,
+		Allowed:       false,
+		ErrorCategory: "authorization",
+		ErrorCode:     authorizationDeniedAuditReason(err),
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	setAuditEntryReason(&entry, authorizationDeniedAuditReason(err))
 	_ = recorder.RecordAudit(entry)

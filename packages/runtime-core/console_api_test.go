@@ -55,11 +55,19 @@ func TestConsoleAPIExposesReadOnlySystemState(t *testing.T) {
 	}
 
 	if err := audits.RecordAudit(pluginsdk.AuditEntry{
-		Actor:      "admin-user",
-		Action:     "enable",
-		Target:     "plugin-echo",
-		Allowed:    true,
-		OccurredAt: "2026-04-03T12:00:00Z",
+		Actor:         "admin-user",
+		Permission:    "plugin:enable",
+		Action:        "enable",
+		Target:        "plugin-echo",
+		Allowed:       true,
+		TraceID:       "trace-console-audit",
+		EventID:       "evt-console-audit",
+		PluginID:      "plugin-echo",
+		RunID:         "run-console-audit",
+		CorrelationID: "corr-console-audit",
+		ErrorCategory: "operator",
+		ErrorCode:     "rollout_prepared",
+		OccurredAt:    "2026-04-03T12:00:00Z",
 	}); err != nil {
 		t.Fatalf("record audit: %v", err)
 	}
@@ -97,7 +105,7 @@ func TestConsoleAPIExposesReadOnlySystemState(t *testing.T) {
 	if !strings.Contains(plugins[0].StatusSummary, "last runtime event dispatch failed via runtime-registry+runtime-dispatch-results") || !strings.Contains(plugins[0].StatusSummary, "recovery=last-dispatch-failed") || !strings.Contains(plugins[0].StatusSummary, "evidence=process-local-volatile") || !strings.Contains(plugins[0].StatusSummary, "current_failure_streak=1") {
 		t.Fatalf("expected plugin status summary to describe runtime evidence, got %q", plugins[0].StatusSummary)
 	}
-	if len(api.Audits()) != 1 || api.Audits()[0].Actor != "admin-user" {
+	if len(api.Audits()) != 1 || api.Audits()[0].Actor != "admin-user" || api.Audits()[0].TraceID != "trace-console-audit" || api.Audits()[0].EventID != "evt-console-audit" || api.Audits()[0].PluginID != "plugin-echo" || api.Audits()[0].RunID != "run-console-audit" || api.Audits()[0].CorrelationID != "corr-console-audit" || api.Audits()[0].ErrorCategory != "operator" || api.Audits()[0].ErrorCode != "rollout_prepared" {
 		t.Fatalf("expected console audits to expose audit trail, got %+v", api.Audits())
 	}
 	if len(api.Logs("plugin-echo")) != 1 {
@@ -125,9 +133,50 @@ func TestConsoleAPIExposesReadOnlySystemState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render json: %v", err)
 	}
-	for _, expected := range []string{"plugin-echo", "job-console", "runtime started", "development", "admin-user", "enable", `"publish": {`, `"sourceType": "git"`, `"sourceUri": "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo"`, `"runtimeVersionRange": "\u003e=0.1.0 \u003c1.0.0"`, `"statusSource": "runtime-registry+runtime-dispatch-results"`, `"statusEvidence": "runtime-dispatch-result"`, `"runtimeStateLive": true`, `"statusPersisted": false`, `"statusLevel": "error"`, `"statusRecovery": "last-dispatch-failed"`, `"statusStaleness": "process-local-volatile"`, `"lastDispatchKind": "event"`, `"lastDispatchSuccess": false`, `"lastDispatchError": "subprocess host dispatch failed: timeout"`, `"lastDispatchAt":`, `"currentFailureStreak": 1`} {
+	for _, expected := range []string{"plugin-echo", "job-console", "runtime started", "development", "admin-user", "enable", `"trace_id": "trace-console-audit"`, `"event_id": "evt-console-audit"`, `"plugin_id": "plugin-echo"`, `"run_id": "run-console-audit"`, `"correlation_id": "corr-console-audit"`, `"error_category": "operator"`, `"error_code": "rollout_prepared"`, `"publish": {`, `"sourceType": "git"`, `"sourceUri": "https://github.com/ohmyopencode/bot-platform/tree/main/plugins/plugin-echo"`, `"runtimeVersionRange": "\u003e=0.1.0 \u003c1.0.0"`, `"statusSource": "runtime-registry+runtime-dispatch-results"`, `"statusEvidence": "runtime-dispatch-result"`, `"runtimeStateLive": true`, `"statusPersisted": false`, `"statusLevel": "error"`, `"statusRecovery": "last-dispatch-failed"`, `"statusStaleness": "process-local-volatile"`, `"lastDispatchKind": "event"`, `"lastDispatchSuccess": false`, `"lastDispatchError": "subprocess host dispatch failed: timeout"`, `"lastDispatchAt":`, `"currentFailureStreak": 1`} {
 		if !strings.Contains(rendered, expected) {
 			t.Fatalf("expected console output to contain %q, got %s", expected, rendered)
+		}
+	}
+}
+
+func TestConsoleAPIReadsPersistedSQLiteAuditsWithObservabilityFields(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+	entry := pluginsdk.AuditEntry{
+		Actor:         "job-operator",
+		Permission:    "job:retry",
+		Action:        "retry",
+		Target:        "job-console-audit-1",
+		Allowed:       true,
+		Reason:        "job_dead_letter_retried",
+		TraceID:       "trace-console-store",
+		EventID:       "evt-console-store",
+		PluginID:      "plugin-ai-chat",
+		RunID:         "run-console-store",
+		CorrelationID: "corr-console-store",
+		ErrorCategory: "operator",
+		ErrorCode:     "job_dead_letter_retried",
+		OccurredAt:    "2026-04-21T08:10:00Z",
+	}
+	if err := store.SaveAudit(context.Background(), entry); err != nil {
+		t.Fatalf("save audit: %v", err)
+	}
+
+	api := NewConsoleAPI(nil, nil, Config{}, nil, store)
+	audits := api.Audits()
+	if len(audits) != 1 || audits[0] != entry {
+		t.Fatalf("expected persisted console audit round-trip, got %+v", audits)
+	}
+	raw, err := api.RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	for _, expected := range []string{`"trace_id": "trace-console-store"`, `"event_id": "evt-console-store"`, `"plugin_id": "plugin-ai-chat"`, `"run_id": "run-console-store"`, `"correlation_id": "corr-console-store"`, `"error_category": "operator"`, `"error_code": "job_dead_letter_retried"`} {
+		if !strings.Contains(raw, expected) {
+			t.Fatalf("expected persisted console audit JSON to include %q, got %s", expected, raw)
 		}
 	}
 }

@@ -1217,7 +1217,6 @@ func TestRuntimeDispatchTreatsNilAndEmptyInstanceConfigAsEquivalentBeyondSupport
 	}
 }
 
-
 func TestRuntimeDispatchRejectsNestedInstanceConfigValueTypeMismatchBeforePluginDelivery(t *testing.T) {
 	t.Parallel()
 
@@ -1816,6 +1815,9 @@ func TestRuntimeDispatchEventStopsBeforePluginWhenEventAuthorizerDenies(t *testi
 	if entries[0].Actor != "viewer-user" || entries[0].Action != "message.read" || entries[0].Permission != "message:read" || entries[0].Target != "plugin-echo" || entries[0].Allowed || auditEntryReason(entries[0]) != "permission_denied" {
 		t.Fatalf("expected denied event audit entry, got %+v", entries[0])
 	}
+	if entries[0].TraceID != "trace-denied" || entries[0].EventID != "evt-denied" || entries[0].PluginID != "plugin-echo" || entries[0].RunID != "run-evt-denied" || entries[0].CorrelationID != "onebot:evt-denied" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
+		t.Fatalf("expected denied event audit observability fields, got %+v", entries[0])
+	}
 	logs := decodeRuntimeLogEntries(t, buffer)
 	matched := false
 	for _, entry := range logs {
@@ -2180,6 +2182,9 @@ func TestRuntimeDispatchJobStopsBeforePluginWhenJobAuthorizerDenies(t *testing.T
 	if entries[0].Actor != "worker-user" || entries[0].Action != "job.run" || entries[0].Permission != "job:run" || entries[0].Target != "plugin-ai-chat" || entries[0].Allowed || auditEntryReason(entries[0]) != "permission_denied" {
 		t.Fatalf("expected denied job audit entry, got %+v", entries[0])
 	}
+	if entries[0].TraceID != "trace-job-denied" || entries[0].EventID != "evt-job-denied" || entries[0].PluginID != "plugin-ai-chat" || entries[0].RunID != "run-evt-job-denied" || entries[0].CorrelationID != "evt-job-denied" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
+		t.Fatalf("expected denied job audit observability fields, got %+v", entries[0])
+	}
 }
 
 func TestRuntimeDispatchJobWithoutPermissionMetadataDoesNotRecordDenyAudit(t *testing.T) {
@@ -2341,6 +2346,9 @@ func TestRuntimeDispatchScheduleWithConfiguredMetadataAuthorizerRecordsDeniedAud
 	if entries[0].Actor != "viewer-user" || entries[0].Action != "schedule.manage" || entries[0].Permission != "schedule:manage" || entries[0].Target != "plugin-scheduler" || entries[0].Allowed || auditEntryReason(entries[0]) != "permission_denied" {
 		t.Fatalf("expected denied schedule audit entry, got %+v", entries[0])
 	}
+	if entries[0].TraceID != "trace-schedule-denied" || entries[0].EventID != "evt-schedule-denied" || entries[0].PluginID != "plugin-scheduler" || entries[0].RunID != "run-evt-schedule-denied" || entries[0].CorrelationID != "evt-schedule-denied" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
+		t.Fatalf("expected denied schedule audit observability fields, got %+v", entries[0])
+	}
 }
 
 func TestRuntimeDispatchScheduleWithoutPermissionMetadataDoesNotRecordDenyAudit(t *testing.T) {
@@ -2488,6 +2496,9 @@ func TestRuntimeDispatchCommandWithConfiguredAdminAuthorizerAllowsAndDenies(t *t
 	}
 	if entries[0].Actor != "viewer-user" || entries[0].Action != "plugin.enable" || entries[0].Permission != "plugin:enable" || entries[0].Target != "plugin-echo" || entries[0].Allowed || auditEntryReason(entries[0]) != "permission_denied" {
 		t.Fatalf("expected denied admin command audit entry, got %+v", entries[0])
+	}
+	if entries[0].TraceID != "trace-viewer" || entries[0].EventID != "evt-viewer" || entries[0].PluginID != "" || entries[0].RunID != "run-evt-viewer" || entries[0].CorrelationID != "evt-viewer" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
+		t.Fatalf("expected denied admin command audit observability fields, got %+v", entries[0])
 	}
 }
 
