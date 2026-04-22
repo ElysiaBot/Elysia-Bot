@@ -453,7 +453,53 @@ export const mockConsoleData: ConsolePayload = {
     traceStateSource: 'runtime-trace-recorder',
     metricsStateSource: 'runtime-metrics-registry',
     verificationEndpoints: ['GET /api/console', 'GET /metrics', 'GET /demo/state/counts'],
-    summary: 'jobs=sqlite-jobs ready=1 | schedules=sqlite-schedule-plans due=0 | metrics=runtime-metrics-registry | logs=runtime-log-buffer | traces=runtime-trace-recorder',
+    alertability: {
+      baseline: [
+        {
+          id: 'repeated_dispatch_failures',
+          severity: 'error',
+          signal: 'plugins[].currentFailureStreak + plugins[].statusSummary',
+          condition: 'currentFailureStreak >= 2 means repeated dispatch failures are already visible in the repo-local console payload',
+          verificationEndpoints: ['GET /api/console', 'GET /metrics'],
+          summary: 'operators can verify repeated dispatch failures from plugin status summaries, failure streaks, and the existing runtime/subprocess dispatch metrics families',
+        },
+        {
+          id: 'ready_backlog',
+          severity: 'warn',
+          signal: 'observability.jobDispatchReady + observability.scheduleDueReady + bot_platform_queue_lag',
+          condition: 'non-zero ready job or due schedule counts expose a repo-local backlog snapshot; repeated reads show whether it is draining',
+          verificationEndpoints: ['GET /api/console', 'GET /metrics'],
+          summary: 'operators can verify queue lag and ready backlog locally from the console snapshot and Prometheus-style metrics without an external monitoring stack',
+        },
+        {
+          id: 'subprocess_failure_classified',
+          severity: 'error',
+          signal: 'plugins[].statusSummary + plugins[].lastDispatchError + bot_platform_subprocess_failure_total',
+          condition: 'subprocess plugin failures stay locally classifiable through existing status summaries and subprocess failure metric labels',
+          verificationEndpoints: ['GET /api/console', 'GET /metrics'],
+          summary: 'operators can verify subprocess failure stage/reason evidence from plugin status summaries and subprocess failure metric families already emitted by runtime-core',
+        },
+        {
+          id: 'dead_letter_failure_paths',
+          severity: 'error',
+          signal: 'alerts[].failureType=job.dead_letter + alerts[].latestReason + jobs[].replySummary/recoverySummary',
+          condition: 'dead-letter alerts preserve the latest repo-local failure reason for reply, upstream, timeout, and adjacent operator-visible failure paths',
+          verificationEndpoints: ['GET /api/console', 'GET /demo/state/counts', 'GET /demo/replies'],
+          summary: 'operators can verify dead-letter failure paths from persisted alert records and the current console job/reply surfaces without external alert routing',
+        },
+      ],
+      activeFindings: [
+        {
+          ruleId: 'ready_backlog',
+          severity: 'warn',
+          status: 'firing',
+          summary: 'ready backlog present; job_dispatch_ready=1 schedule_due_ready=0',
+          evidence: ['job_dispatch_ready=1', 'schedule_due_ready=0', 'ready_jobs=job-1'],
+        },
+      ],
+      summary: '4 rules 1 active findings via repo-local console/metrics surfaces',
+    },
+    summary: 'jobs=sqlite-jobs ready=1 | schedules=sqlite-schedule-plans due=0 | metrics=runtime-metrics-registry | logs=runtime-log-buffer | traces=runtime-trace-recorder | alertability=4 rules 1 active findings via repo-local console/metrics surfaces',
   },
 };
 

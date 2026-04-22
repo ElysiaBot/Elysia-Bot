@@ -220,15 +220,39 @@ type ConsoleRolloutOperation struct {
 }
 
 type ConsoleObservability struct {
-	JobDispatchReady      int      `json:"jobDispatchReady"`
-	ScheduleDueReady      int      `json:"scheduleDueReady"`
-	JobStateSource        string   `json:"jobStateSource,omitempty"`
-	ScheduleStateSource   string   `json:"scheduleStateSource,omitempty"`
-	LogStateSource        string   `json:"logStateSource,omitempty"`
-	TraceStateSource      string   `json:"traceStateSource,omitempty"`
-	MetricsStateSource    string   `json:"metricsStateSource,omitempty"`
+	JobDispatchReady      int                 `json:"jobDispatchReady"`
+	ScheduleDueReady      int                 `json:"scheduleDueReady"`
+	JobStateSource        string              `json:"jobStateSource,omitempty"`
+	ScheduleStateSource   string              `json:"scheduleStateSource,omitempty"`
+	LogStateSource        string              `json:"logStateSource,omitempty"`
+	TraceStateSource      string              `json:"traceStateSource,omitempty"`
+	MetricsStateSource    string              `json:"metricsStateSource,omitempty"`
+	VerificationEndpoints []string            `json:"verificationEndpoints,omitempty"`
+	Alertability          ConsoleAlertability `json:"alertability"`
+	Summary               string              `json:"summary,omitempty"`
+}
+
+type ConsoleAlertability struct {
+	Baseline       []ConsoleAlertabilityRule    `json:"baseline,omitempty"`
+	ActiveFindings []ConsoleAlertabilityFinding `json:"activeFindings,omitempty"`
+	Summary        string                       `json:"summary,omitempty"`
+}
+
+type ConsoleAlertabilityRule struct {
+	ID                    string   `json:"id"`
+	Severity              string   `json:"severity"`
+	Signal                string   `json:"signal"`
+	Condition             string   `json:"condition"`
 	VerificationEndpoints []string `json:"verificationEndpoints,omitempty"`
 	Summary               string   `json:"summary,omitempty"`
+}
+
+type ConsoleAlertabilityFinding struct {
+	RuleID   string   `json:"ruleId"`
+	Severity string   `json:"severity"`
+	Status   string   `json:"status"`
+	Summary  string   `json:"summary"`
+	Evidence []string `json:"evidence,omitempty"`
 }
 
 type consoleScheduleReader interface {
@@ -1229,12 +1253,13 @@ func (c *ConsoleAPI) renderJSONWithFilters(logQuery, jobQuery, pluginID string) 
 	if err != nil {
 		return "", err
 	}
+	plugins := c.FilteredPlugins(pluginID)
 	payload := map[string]any{
 		"adapters":      adapterInstances,
 		"alerts":        alerts,
 		"replayOps":     replayOps,
 		"rolloutOps":    rolloutOps,
-		"plugins":       c.FilteredPlugins(pluginID),
+		"plugins":       plugins,
 		"jobs":          jobs,
 		"schedules":     schedules,
 		"workflows":     workflows,
@@ -1243,7 +1268,7 @@ func (c *ConsoleAPI) renderJSONWithFilters(logQuery, jobQuery, pluginID string) 
 		"config":        c.Config(),
 		"meta":          c.meta,
 		"recovery":      c.Recovery(),
-		"observability": c.Observability(jobs, schedules),
+		"observability": c.Observability(plugins, jobs, schedules, alerts),
 		"status":        status,
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")
@@ -1510,7 +1535,7 @@ func (c *ConsoleAPI) Recovery() ConsoleRecovery {
 	}
 }
 
-func (c *ConsoleAPI) Observability(jobs []ConsoleJob, schedules []ConsoleSchedule) ConsoleObservability {
+func (c *ConsoleAPI) Observability(plugins []ConsolePlugin, jobs []ConsoleJob, schedules []ConsoleSchedule, alerts []AlertRecord) ConsoleObservability {
 	jobReady := 0
 	for _, job := range jobs {
 		if job.DispatchReady {
@@ -1533,6 +1558,7 @@ func (c *ConsoleAPI) Observability(jobs []ConsoleJob, schedules []ConsoleSchedul
 		MetricsStateSource:    consoleMetaString(c.meta, "metrics_source"),
 		VerificationEndpoints: consoleMetaStringSlice(c.meta, "verification_endpoints"),
 	}
+	obs.Alertability = consoleAlertabilityBaseline(plugins, jobs, schedules, alerts)
 	obs.Summary = consoleObservabilitySummary(obs)
 	return obs
 }
@@ -1583,7 +1609,199 @@ func consoleObservabilitySummary(obs ConsoleObservability) string {
 	if obs.TraceStateSource != "" {
 		parts = append(parts, "traces="+obs.TraceStateSource)
 	}
+	if obs.Alertability.Summary != "" {
+		parts = append(parts, "alertability="+obs.Alertability.Summary)
+	}
 	return strings.Join(parts, " | ")
+}
+
+const (
+	consoleAlertabilityRuleRepeatedDispatchFailures = "repeated_dispatch_failures"
+	consoleAlertabilityRuleReadyBacklog             = "ready_backlog"
+	consoleAlertabilityRuleSubprocessFailure        = "subprocess_failure_classified"
+	consoleAlertabilityRuleDeadLetterFailurePath    = "dead_letter_failure_paths"
+)
+
+func consoleAlertabilityBaseline(plugins []ConsolePlugin, jobs []ConsoleJob, schedules []ConsoleSchedule, alerts []AlertRecord) ConsoleAlertability {
+	baseline := []ConsoleAlertabilityRule{
+		{
+			ID:                    consoleAlertabilityRuleRepeatedDispatchFailures,
+			Severity:              "error",
+			Signal:                "plugins[].currentFailureStreak + plugins[].statusSummary",
+			Condition:             "currentFailureStreak >= 2 means repeated dispatch failures are already visible in the repo-local console payload",
+			VerificationEndpoints: []string{"GET /api/console", "GET /metrics"},
+			Summary:               "operators can verify repeated dispatch failures from plugin status summaries, failure streaks, and the existing runtime/subprocess dispatch metrics families",
+		},
+		{
+			ID:                    consoleAlertabilityRuleReadyBacklog,
+			Severity:              "warn",
+			Signal:                "observability.jobDispatchReady + observability.scheduleDueReady + bot_platform_queue_lag",
+			Condition:             "non-zero ready job or due schedule counts expose a repo-local backlog snapshot; repeated reads show whether it is draining",
+			VerificationEndpoints: []string{"GET /api/console", "GET /metrics"},
+			Summary:               "operators can verify queue lag and ready backlog locally from the console snapshot and Prometheus-style metrics without an external monitoring stack",
+		},
+		{
+			ID:                    consoleAlertabilityRuleSubprocessFailure,
+			Severity:              "error",
+			Signal:                "plugins[].statusSummary + plugins[].lastDispatchError + bot_platform_subprocess_failure_total",
+			Condition:             "subprocess plugin failures stay locally classifiable through existing status summaries and subprocess failure metric labels",
+			VerificationEndpoints: []string{"GET /api/console", "GET /metrics"},
+			Summary:               "operators can verify subprocess failure stage/reason evidence from plugin status summaries and subprocess failure metric families already emitted by runtime-core",
+		},
+		{
+			ID:                    consoleAlertabilityRuleDeadLetterFailurePath,
+			Severity:              "error",
+			Signal:                "alerts[].failureType=job.dead_letter + alerts[].latestReason + jobs[].replySummary/recoverySummary",
+			Condition:             "dead-letter alerts preserve the latest repo-local failure reason for reply, upstream, timeout, and adjacent operator-visible failure paths",
+			VerificationEndpoints: []string{"GET /api/console", "GET /demo/state/counts", "GET /demo/replies"},
+			Summary:               "operators can verify dead-letter failure paths from persisted alert records and the current console job/reply surfaces without external alert routing",
+		},
+	}
+	findings := make([]ConsoleAlertabilityFinding, 0)
+	findings = append(findings, consoleRepeatedDispatchFailureFindings(plugins)...)
+	findings = append(findings, consoleReadyBacklogFindings(jobs, schedules)...)
+	findings = append(findings, consoleSubprocessFailureFindings(plugins)...)
+	findings = append(findings, consoleDeadLetterFailureFindings(alerts)...)
+	alertability := ConsoleAlertability{
+		Baseline:       baseline,
+		ActiveFindings: findings,
+	}
+	alertability.Summary = consoleAlertabilitySummary(alertability)
+	return alertability
+}
+
+func consoleRepeatedDispatchFailureFindings(plugins []ConsolePlugin) []ConsoleAlertabilityFinding {
+	findings := make([]ConsoleAlertabilityFinding, 0)
+	for _, plugin := range plugins {
+		if plugin.CurrentFailureStreak < 2 {
+			continue
+		}
+		evidence := []string{fmt.Sprintf("plugin=%s", plugin.ID), fmt.Sprintf("current_failure_streak=%d", plugin.CurrentFailureStreak)}
+		if plugin.StatusSource != "" {
+			evidence = append(evidence, "status_source="+plugin.StatusSource)
+		}
+		if plugin.StatusSummary != "" {
+			evidence = append(evidence, plugin.StatusSummary)
+		}
+		findings = append(findings, ConsoleAlertabilityFinding{
+			RuleID:   consoleAlertabilityRuleRepeatedDispatchFailures,
+			Severity: "error",
+			Status:   "firing",
+			Summary:  fmt.Sprintf("plugin %s has repeated dispatch failures; current_failure_streak=%d", plugin.ID, plugin.CurrentFailureStreak),
+			Evidence: evidence,
+		})
+	}
+	return findings
+}
+
+func consoleReadyBacklogFindings(jobs []ConsoleJob, schedules []ConsoleSchedule) []ConsoleAlertabilityFinding {
+	jobIDs := make([]string, 0)
+	for _, job := range jobs {
+		if job.DispatchReady {
+			jobIDs = append(jobIDs, job.ID)
+		}
+	}
+	scheduleIDs := make([]string, 0)
+	for _, schedule := range schedules {
+		if schedule.DueReady {
+			scheduleIDs = append(scheduleIDs, schedule.ID)
+		}
+	}
+	if len(jobIDs) == 0 && len(scheduleIDs) == 0 {
+		return nil
+	}
+	evidence := []string{fmt.Sprintf("job_dispatch_ready=%d", len(jobIDs)), fmt.Sprintf("schedule_due_ready=%d", len(scheduleIDs))}
+	if len(jobIDs) > 0 {
+		evidence = append(evidence, "ready_jobs="+strings.Join(jobIDs, ","))
+	}
+	if len(scheduleIDs) > 0 {
+		evidence = append(evidence, "due_schedules="+strings.Join(scheduleIDs, ","))
+	}
+	return []ConsoleAlertabilityFinding{{
+		RuleID:   consoleAlertabilityRuleReadyBacklog,
+		Severity: "warn",
+		Status:   "firing",
+		Summary:  fmt.Sprintf("ready backlog present; job_dispatch_ready=%d schedule_due_ready=%d", len(jobIDs), len(scheduleIDs)),
+		Evidence: evidence,
+	}}
+}
+
+func consoleSubprocessFailureFindings(plugins []ConsolePlugin) []ConsoleAlertabilityFinding {
+	findings := make([]ConsoleAlertabilityFinding, 0)
+	for _, plugin := range plugins {
+		if plugin.Mode != string(pluginsdk.ModeSubprocess) || plugin.LastDispatchSuccess == nil || *plugin.LastDispatchSuccess {
+			continue
+		}
+		evidence := []string{fmt.Sprintf("plugin=%s", plugin.ID)}
+		if plugin.StatusEvidence != "" {
+			evidence = append(evidence, "status_evidence="+plugin.StatusEvidence)
+		}
+		if plugin.LastDispatchError != "" {
+			evidence = append(evidence, "last_dispatch_error="+plugin.LastDispatchError)
+		}
+		if plugin.StatusSummary != "" {
+			evidence = append(evidence, plugin.StatusSummary)
+		}
+		findings = append(findings, ConsoleAlertabilityFinding{
+			RuleID:   consoleAlertabilityRuleSubprocessFailure,
+			Severity: "error",
+			Status:   "firing",
+			Summary:  fmt.Sprintf("subprocess plugin %s currently reports a classified failure path", plugin.ID),
+			Evidence: evidence,
+		})
+	}
+	return findings
+}
+
+func consoleDeadLetterFailureFindings(alerts []AlertRecord) []ConsoleAlertabilityFinding {
+	findings := make([]ConsoleAlertabilityFinding, 0)
+	for _, alert := range alerts {
+		if alert.FailureType != alertFailureTypeJobDeadLetter {
+			continue
+		}
+		classification := consoleDeadLetterFailureClassification(alert.LatestReason)
+		summary := fmt.Sprintf("dead-letter alert for job %s preserves failure reason %q", alert.ObjectID, alert.LatestReason)
+		if classification != "" {
+			summary = fmt.Sprintf("dead-letter alert for job %s preserves %s failure reason %q", alert.ObjectID, classification, alert.LatestReason)
+		}
+		evidence := []string{fmt.Sprintf("alert_id=%s", alert.ID), fmt.Sprintf("failure_type=%s", alert.FailureType)}
+		if alert.Correlation != "" {
+			evidence = append(evidence, "correlation="+alert.Correlation)
+		}
+		if alert.LatestReason != "" {
+			evidence = append(evidence, "latest_reason="+alert.LatestReason)
+		}
+		findings = append(findings, ConsoleAlertabilityFinding{
+			RuleID:   consoleAlertabilityRuleDeadLetterFailurePath,
+			Severity: "error",
+			Status:   "firing",
+			Summary:  summary,
+			Evidence: evidence,
+		})
+	}
+	return findings
+}
+
+func consoleDeadLetterFailureClassification(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(reason, "reply") || strings.Contains(reason, "upstream") || strings.Contains(reason, "status 5"):
+		return "reply-or-upstream"
+	case strings.Contains(reason, "timeout"):
+		return "timeout"
+	default:
+		return "dead-letter"
+	}
+}
+
+func consoleAlertabilitySummary(alertability ConsoleAlertability) string {
+	if len(alertability.Baseline) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d rules %d active findings via repo-local console/metrics surfaces", len(alertability.Baseline), len(alertability.ActiveFindings))
 }
 
 func consoleReplayOperationSummary(item ConsoleReplayOperation) string {

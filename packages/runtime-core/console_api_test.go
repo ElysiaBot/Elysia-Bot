@@ -810,6 +810,154 @@ func TestConsoleAPIRecoveryIncludesScheduleRestoreFields(t *testing.T) {
 	}
 }
 
+func TestConsoleAPIObservabilityExposesMinimalAlertabilityBaseline(t *testing.T) {
+	t.Parallel()
+
+	runtime := NewInMemoryRuntime(NoopSupervisor{}, DirectPluginHost{})
+	if err := runtime.RegisterPlugin(pluginsdk.Plugin{
+		Manifest: pluginsdk.PluginManifest{
+			ID:         "plugin-alertability",
+			Name:       "Alertability Plugin",
+			Version:    "0.1.0",
+			APIVersion: "v0",
+			Mode:       pluginsdk.ModeSubprocess,
+			Entry:      pluginsdk.PluginEntry{Module: "plugins/plugin-alertability", Symbol: "Plugin"},
+		},
+		Handlers: pluginsdk.Handlers{Event: noopConsoleHandler{}},
+	}); err != nil {
+		t.Fatalf("register plugin: %v", err)
+	}
+	failureAt := time.Date(2026, 4, 22, 10, 0, 0, 0, time.UTC)
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-alertability", Kind: "event", Success: false, Error: "subprocess host dispatch failed after handshake: upstream status 502", At: failureAt})
+	runtime.recordDispatch(DispatchResult{PluginID: "plugin-alertability", Kind: "event", Success: false, Error: "subprocess host dispatch failed after handshake: upstream status 502", At: failureAt.Add(1 * time.Minute)})
+
+	readyJob := NewJob("job-alertability-ready", "ai.chat", 1, 30*time.Second)
+	readyJob.Payload = map[string]any{
+		"dispatch": map[string]any{
+			"target_plugin_id": "plugin-ai-chat",
+			"permission":       "job:run",
+			"actor":            "runtime-job-runner",
+		},
+		"reply_handle": map[string]any{
+			"capability": "onebot.reply",
+			"target_id":  "group-42",
+		},
+		"reply_target": "group-42",
+	}
+	jobs := []ConsoleJob{toConsoleJob(readyJob)}
+
+	dueAt := time.Now().UTC().Add(-1 * time.Minute)
+	schedules := []ConsoleSchedule{{
+		ID:              "schedule-alertability-due",
+		Kind:            string(ScheduleKindDelay),
+		Source:          "console-test",
+		EventType:       "message.received",
+		DueAt:           &dueAt,
+		DueReady:        true,
+		DueStateSummary: "due",
+		ScheduleSummary: "message.received | delay due",
+	}}
+	alerts := []AlertRecord{{
+		ID:               "job.dead_letter:job-alertability-dead",
+		ObjectType:       alertObjectTypeJob,
+		ObjectID:         "job-alertability-dead",
+		FailureType:      alertFailureTypeJobDeadLetter,
+		FirstOccurredAt:  failureAt,
+		LatestOccurredAt: failureAt.Add(2 * time.Minute),
+		LatestReason:     "reply upstream status 502",
+		Correlation:      "corr-alertability-dead",
+		CreatedAt:        failureAt.Add(2 * time.Minute),
+	}}
+
+	api := NewConsoleAPI(runtime, nil, Config{}, nil, nil)
+	api.SetJobReader(staticConsoleJobReader{jobs: []Job{readyJob}})
+	api.SetScheduleReader(staticConsoleScheduleReader{schedules: schedules})
+	api.SetAlertReader(staticConsoleAlertReader{alerts: alerts})
+	api.SetMeta(map[string]any{
+		"job_status_source":      "sqlite-jobs",
+		"schedule_status_source": "sqlite-schedule-plans",
+		"log_source":             "runtime-log-buffer",
+		"trace_source":           "runtime-trace-recorder",
+		"metrics_source":         "runtime-metrics-registry",
+		"verification_endpoints": []string{"GET /api/console", "GET /metrics", "GET /demo/state/counts", "GET /demo/replies"},
+	})
+
+	obs := api.Observability(api.Plugins(), jobs, schedules, alerts)
+	if len(obs.Alertability.Baseline) != 4 {
+		t.Fatalf("expected four alertability baseline rules, got %+v", obs.Alertability.Baseline)
+	}
+	if len(obs.Alertability.ActiveFindings) != 4 {
+		t.Fatalf("expected four active findings, got %+v", obs.Alertability.ActiveFindings)
+	}
+	if obs.JobDispatchReady != 1 || obs.ScheduleDueReady != 1 {
+		t.Fatalf("expected alertability snapshot to preserve ready counts, got %+v", obs)
+	}
+	for _, expectedRuleID := range []string{
+		consoleAlertabilityRuleRepeatedDispatchFailures,
+		consoleAlertabilityRuleReadyBacklog,
+		consoleAlertabilityRuleSubprocessFailure,
+		consoleAlertabilityRuleDeadLetterFailurePath,
+	} {
+		if !hasAlertabilityRule(obs.Alertability.Baseline, expectedRuleID) {
+			t.Fatalf("expected baseline to include %q, got %+v", expectedRuleID, obs.Alertability.Baseline)
+		}
+		if !hasAlertabilityFinding(obs.Alertability.ActiveFindings, expectedRuleID) {
+			t.Fatalf("expected active findings to include %q, got %+v", expectedRuleID, obs.Alertability.ActiveFindings)
+		}
+	}
+	if !strings.Contains(obs.Alertability.Summary, "4 rules 4 active findings") {
+		t.Fatalf("expected alertability summary to describe rule/finding counts, got %q", obs.Alertability.Summary)
+	}
+	if !strings.Contains(obs.Summary, "alertability=4 rules 4 active findings via repo-local console/metrics surfaces") {
+		t.Fatalf("expected observability summary to include alertability baseline, got %q", obs.Summary)
+	}
+
+	raw, err := api.RenderJSON()
+	if err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	for _, expected := range []string{
+		`"alertability": {`,
+		`"id": "repeated_dispatch_failures"`,
+		`"id": "ready_backlog"`,
+		`"id": "subprocess_failure_classified"`,
+		`"id": "dead_letter_failure_paths"`,
+		`"ruleId": "repeated_dispatch_failures"`,
+		`"ruleId": "ready_backlog"`,
+		`"ruleId": "subprocess_failure_classified"`,
+		`"ruleId": "dead_letter_failure_paths"`,
+		`"summary": "plugin plugin-alertability has repeated dispatch failures; current_failure_streak=2"`,
+		`"summary": "ready backlog present; job_dispatch_ready=1 schedule_due_ready=1"`,
+		`"summary": "subprocess plugin plugin-alertability currently reports a classified failure path"`,
+		`"summary": "dead-letter alert for job job-alertability-dead preserves reply-or-upstream failure reason \"reply upstream status 502\""`,
+		`"verificationEndpoints": [`,
+		`"GET /metrics"`,
+		`"GET /demo/replies"`,
+	} {
+		if !strings.Contains(raw, expected) {
+			t.Fatalf("expected rendered console payload to contain %q, got %s", expected, raw)
+		}
+	}
+}
+
+func hasAlertabilityRule(rules []ConsoleAlertabilityRule, ruleID string) bool {
+	for _, rule := range rules {
+		if rule.ID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAlertabilityFinding(findings []ConsoleAlertabilityFinding, ruleID string) bool {
+	for _, finding := range findings {
+		if finding.RuleID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConsoleAPIServesReadOnlyJSONOverHTTP(t *testing.T) {
 	t.Parallel()
 
@@ -2411,10 +2559,28 @@ func (r failingConsoleScheduleReader) ListSchedulePlans() ([]ConsoleSchedule, er
 	return nil, r.err
 }
 
+type staticConsoleScheduleReader struct{ schedules []ConsoleSchedule }
+
+func (r staticConsoleScheduleReader) ListSchedulePlans() ([]ConsoleSchedule, error) {
+	return append([]ConsoleSchedule(nil), r.schedules...), nil
+}
+
 type failingConsoleJobReader struct{ err error }
 
 func (r failingConsoleJobReader) ListJobs() ([]Job, error) {
 	return nil, r.err
+}
+
+type staticConsoleJobReader struct{ jobs []Job }
+
+func (r staticConsoleJobReader) ListJobs() ([]Job, error) {
+	return append([]Job(nil), r.jobs...), nil
+}
+
+type staticConsoleAlertReader struct{ alerts []AlertRecord }
+
+func (r staticConsoleAlertReader) ListAlerts() ([]AlertRecord, error) {
+	return append([]AlertRecord(nil), r.alerts...), nil
 }
 
 type noopConsoleHandler struct{}

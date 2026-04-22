@@ -318,6 +318,24 @@ export type ConsoleObservability = {
   traceStateSource?: string;
   metricsStateSource?: string;
   verificationEndpoints?: string[];
+  alertability?: {
+    baseline?: {
+      id: string;
+      severity: string;
+      signal: string;
+      condition: string;
+      verificationEndpoints?: string[];
+      summary?: string;
+    }[];
+    activeFindings?: {
+      ruleId: string;
+      severity: string;
+      status: string;
+      summary: string;
+      evidence?: string[];
+    }[];
+    summary?: string;
+  };
   summary?: string;
 };
 
