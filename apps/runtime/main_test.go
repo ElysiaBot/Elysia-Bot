@@ -432,6 +432,21 @@ func readRuntimeConsoleResponse(t *testing.T, app *runtimeApp) runtimeConsoleRes
 	return payload
 }
 
+func readRuntimeConsoleResponseAsViewer(t *testing.T, app *runtimeApp, path string) runtimeConsoleResponse {
+	t.Helper()
+	req := consoleRequestWithViewer(path)
+	resp := httptest.NewRecorder()
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected console 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload runtimeConsoleResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode console payload: %v", err)
+	}
+	return payload
+}
+
 func exportedTraceSpans(t *testing.T, exporter *runtimeTestTraceExporter, traceID string) []runtimecore.ExportedSpan {
 	t.Helper()
 	if exporter == nil {
@@ -1118,13 +1133,45 @@ func writeConsoleRBACConfig(t *testing.T) string {
 
 func writeScheduleCancelRBACConfig(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	return writeScheduleCancelRBACConfigAt(t, t.TempDir(), "sqlite", "")
+}
+
+func writeScheduleCancelRBACConfigAt(t *testing.T, dir string, backend string, dsn string) string {
+	t.Helper()
+	var builder strings.Builder
+	builder.WriteString("runtime:\n")
+	builder.WriteString("  environment: test\n")
+	builder.WriteString("  log_level: debug\n")
+	builder.WriteString("  http_port: 18080\n")
+	builder.WriteString("  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n")
+	if strings.TrimSpace(backend) != "" && strings.TrimSpace(backend) != "sqlite" {
+		builder.WriteString("  smoke_store_backend: " + strings.TrimSpace(backend) + "\n")
+	}
+	if strings.TrimSpace(dsn) != "" {
+		builder.WriteString("  postgres_dsn: \"" + strings.ReplaceAll(dsn, "\"", "\\\"") + "\"\n")
+	}
+	builder.WriteString("  scheduler_interval_ms: 20\n")
+	builder.WriteString("rbac:\n")
+	builder.WriteString("  actor_roles:\n")
+	builder.WriteString("    schedule-admin: [schedule-operator]\n")
+	builder.WriteString("    viewer-user: [schedule-viewer]\n")
+	builder.WriteString("  policies:\n")
+	builder.WriteString("    schedule-operator:\n")
+	builder.WriteString("      permissions: [schedule:cancel]\n")
+	builder.WriteString("      plugin_scope: ['*']\n")
+	builder.WriteString("    schedule-viewer:\n")
+	builder.WriteString("      permissions: [schedule:view]\n")
+	builder.WriteString("      plugin_scope: ['*']\n")
 	path := filepath.Join(dir, "config.yaml")
-	content := "runtime:\n  environment: test\n  log_level: debug\n  http_port: 18080\n  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n  scheduler_interval_ms: 20\nrbac:\n  actor_roles:\n    schedule-admin: [schedule-operator]\n    viewer-user: [schedule-viewer]\n  policies:\n    schedule-operator:\n      permissions: [schedule:cancel]\n      plugin_scope: ['*']\n    schedule-viewer:\n      permissions: [schedule:view]\n      plugin_scope: ['*']\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func writeScheduleCancelRBACConfigWithPostgresSmokeStoreAt(t *testing.T, dir string, dsn string) string {
+	t.Helper()
+	return writeScheduleCancelRBACConfigAt(t, dir, "postgres", dsn)
 }
 
 func writeWriteActionRBACConfig(t *testing.T) string {
@@ -1134,12 +1181,53 @@ func writeWriteActionRBACConfig(t *testing.T) string {
 
 func writeWriteActionRBACConfigAt(t *testing.T, dir string) string {
 	t.Helper()
+	return writeWriteActionRBACConfigWithBackendAt(t, dir, "sqlite", "")
+}
+
+func writeWriteActionRBACConfigWithBackendAt(t *testing.T, dir string, backend string, dsn string) string {
+	t.Helper()
+	var builder strings.Builder
+	builder.WriteString("runtime:\n")
+	builder.WriteString("  environment: test\n")
+	builder.WriteString("  log_level: debug\n")
+	builder.WriteString("  http_port: 18080\n")
+	builder.WriteString("  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n")
+	if strings.TrimSpace(backend) != "" && strings.TrimSpace(backend) != "sqlite" {
+		builder.WriteString("  smoke_store_backend: " + strings.TrimSpace(backend) + "\n")
+	}
+	if strings.TrimSpace(dsn) != "" {
+		builder.WriteString("  postgres_dsn: \"" + strings.ReplaceAll(dsn, "\"", "\\\"") + "\"\n")
+	}
+	builder.WriteString("  scheduler_interval_ms: 20\n")
+	builder.WriteString("rbac:\n")
+	builder.WriteString("  actor_roles:\n")
+	builder.WriteString("    job-operator: [job-operator]\n")
+	builder.WriteString("    config-operator: [config-operator]\n")
+	builder.WriteString("    runtime-job-runner: [runtime-job-runner]\n")
+	builder.WriteString("    viewer-user: [viewer]\n")
+	builder.WriteString("  policies:\n")
+	builder.WriteString("    job-operator:\n")
+	builder.WriteString("      permissions: [job:retry]\n")
+	builder.WriteString("      plugin_scope: ['*']\n")
+	builder.WriteString("    config-operator:\n")
+	builder.WriteString("      permissions: [plugin:config]\n")
+	builder.WriteString("      plugin_scope: ['plugin-echo']\n")
+	builder.WriteString("    runtime-job-runner:\n")
+	builder.WriteString("      permissions: [job:run]\n")
+	builder.WriteString("      plugin_scope: ['plugin-ai-chat']\n")
+	builder.WriteString("    viewer:\n")
+	builder.WriteString("      permissions: [console:read]\n")
+	builder.WriteString("      plugin_scope: ['console']\n")
 	path := filepath.Join(dir, "config.yaml")
-	content := "runtime:\n  environment: test\n  log_level: debug\n  http_port: 18080\n  sqlite_path: " + filepath.ToSlash(filepath.Join(dir, "runtime.sqlite")) + "\n  scheduler_interval_ms: 20\nrbac:\n  actor_roles:\n    job-operator: [job-operator]\n    config-operator: [config-operator]\n    runtime-job-runner: [runtime-job-runner]\n    viewer-user: [viewer]\n  policies:\n    job-operator:\n      permissions: [job:retry]\n      plugin_scope: ['*']\n    config-operator:\n      permissions: [plugin:config]\n      plugin_scope: ['plugin-echo']\n    runtime-job-runner:\n      permissions: [job:run]\n      plugin_scope: ['plugin-ai-chat']\n    viewer:\n      permissions: [console:read]\n      plugin_scope: ['console']\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	return path
+}
+
+func writeWriteActionRBACConfigWithPostgresSmokeStoreAt(t *testing.T, dir string, dsn string) string {
+	t.Helper()
+	return writeWriteActionRBACConfigWithBackendAt(t, dir, "postgres", dsn)
 }
 
 func consoleRequestWithViewer(path string) *http.Request {
@@ -2593,6 +2681,124 @@ func TestRuntimeAppWorkflowDemoPersistsAndRecoversAcrossRestart(t *testing.T) {
 	t.Fatalf(`expected workflow-user-1 in console payload, got %+v`, console.Workflows)
 }
 
+func TestRuntimeAppWorkflowDemoRestoresAcrossRestartWithPostgresSelectedBackend(t *testing.T) {
+	dir := t.TempDir()
+	configPath := writeTestConfigWithPostgresSmokeStoreAt(t, dir, runtimePostgresTestDSN(t))
+
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app with postgres workflow restore config: %v", err)
+	}
+	startResp := performRuntimeWorkflowMessageRequest(t, app, `{"actor_id":"postgres-restore-user","message":"start workflow"}`)
+	if startResp.Code != http.StatusOK {
+		t.Fatalf("expected workflow start 200, got %d: %s", startResp.Code, startResp.Body.String())
+	}
+	if !strings.Contains(startResp.Body.String(), `workflow started, please send another message to continue`) {
+		t.Fatalf("expected workflow start reply, got %s", startResp.Body.String())
+	}
+
+	workflowID := "workflow-postgres-restore-user"
+	postgresStore, ok := app.runtimeState.(*runtimecore.PostgresStore)
+	if !ok {
+		t.Fatalf("expected postgres runtime state for workflow restore path, got %T", app.runtimeState)
+	}
+	started, err := postgresStore.LoadWorkflowInstance(t.Context(), workflowID)
+	if err != nil {
+		t.Fatalf("load postgres workflow instance before restart: %v", err)
+	}
+	if started.PluginID != "plugin-workflow-demo" || started.Status != runtimecore.WorkflowRuntimeStatusWaitingEvent {
+		t.Fatalf("expected waiting postgres workflow before restart, got %+v", started)
+	}
+	if started.Workflow.WaitingFor != "message.received" || started.Workflow.State["greeting"] != "start workflow" || started.Workflow.Completed {
+		t.Fatalf("expected persisted postgres workflow waiting state, got %+v", started.Workflow)
+	}
+	startedTraceID := started.TraceID
+	startedEventID := started.EventID
+	startedRunID := started.RunID
+	startedCorrelationID := started.CorrelationID
+	if startedTraceID == "" || startedEventID == "" || startedRunID == "" || startedCorrelationID == "" {
+		t.Fatalf("expected postgres workflow observability ids before restart, got %+v", started)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	restarted, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("restart runtime app with postgres workflow restore config: %v", err)
+	}
+	defer func() { _ = restarted.Close() }()
+
+	recovery := restarted.workflowRuntime.LastRecoverySnapshot()
+	if recovery.TotalWorkflows != 1 || recovery.RecoveredWorkflows != 1 || recovery.StatusCounts[runtimecore.WorkflowRuntimeStatusWaitingEvent] != 1 {
+		t.Fatalf("expected postgres workflow recovery snapshot after restart, got %+v", recovery)
+	}
+	resumeResp := performRuntimeWorkflowMessageRequest(t, restarted, `{"actor_id":"postgres-restore-user","message":"continue"}`)
+	if resumeResp.Code != http.StatusOK {
+		t.Fatalf("expected workflow resume 200, got %d: %s", resumeResp.Code, resumeResp.Body.String())
+	}
+	if !strings.Contains(resumeResp.Body.String(), `workflow resumed and completed`) {
+		t.Fatalf("expected workflow resume reply, got %s", resumeResp.Body.String())
+	}
+
+	restartedPostgresStore, ok := restarted.runtimeState.(*runtimecore.PostgresStore)
+	if !ok {
+		t.Fatalf("expected restarted runtime state to remain postgres-backed, got %T", restarted.runtimeState)
+	}
+	completed, err := restartedPostgresStore.LoadWorkflowInstance(t.Context(), workflowID)
+	if err != nil {
+		t.Fatalf("load postgres workflow instance after restart: %v", err)
+	}
+	if completed.Status != runtimecore.WorkflowRuntimeStatusCompleted || !completed.Workflow.Completed || !completed.Workflow.Compensated {
+		t.Fatalf("expected completed postgres workflow after restart resume, got %+v", completed)
+	}
+	if completed.TraceID != startedTraceID || completed.EventID != startedEventID || completed.RunID != startedRunID || completed.CorrelationID != startedCorrelationID {
+		t.Fatalf("expected postgres workflow origin observability ids to stay stable, got %+v", completed)
+	}
+	if completed.LastEventID == completed.EventID {
+		t.Fatalf("expected postgres workflow cursor to move to latest trigger while origin event id stays stable, got %+v", completed)
+	}
+
+	counts, err := restarted.runtimeStateCounts(t.Context())
+	if err != nil {
+		t.Fatalf("runtime state counts after postgres workflow restore: %v", err)
+	}
+	if counts["workflow_instances"] < 1 {
+		t.Fatalf("expected postgres workflow counts after restore, got %+v", counts)
+	}
+	sqliteCounts, err := restarted.state.Counts(t.Context())
+	if err != nil {
+		t.Fatalf("sqlite counts after postgres workflow restore: %v", err)
+	}
+	if sqliteCounts["workflow_instances"] != 0 {
+		t.Fatalf("expected sqlite workflow table to remain empty under postgres restore path, got %+v", sqliteCounts)
+	}
+
+	console := readRuntimeConsoleResponseAsViewer(t, restarted, "/api/console?plugin_id=plugin-workflow-demo")
+	if got := consoleMetaString(t, console.Meta, "workflow_read_model"); got != "postgres-workflow-instances" {
+		t.Fatalf("expected workflow_read_model=postgres-workflow-instances, got %q", got)
+	}
+	if got := consoleMetaString(t, console.Meta, "workflow_status_source"); got != "postgres-workflow-instances" {
+		t.Fatalf("expected workflow_status_source=postgres-workflow-instances, got %q", got)
+	}
+	for _, workflow := range console.Workflows {
+		if workflow.ID != workflowID {
+			continue
+		}
+		if workflow.PluginID != "plugin-workflow-demo" || workflow.Status != "completed" || !workflow.Completed || !workflow.Compensated {
+			t.Fatalf("expected postgres console workflow facts after restore, got %+v", workflow)
+		}
+		if workflow.TraceID != startedTraceID || workflow.EventID != startedEventID || workflow.RunID != startedRunID || workflow.CorrelationID != startedCorrelationID {
+			t.Fatalf("expected postgres console workflow origin observability ids after restore, got %+v", workflow)
+		}
+		if workflow.StatusSource != "postgres-workflow-instances" || !workflow.StatePersisted || workflow.RuntimeOwner != "runtime-core" {
+			t.Fatalf("expected postgres console workflow provenance after restore, got %+v", workflow)
+		}
+		return
+	}
+	t.Fatalf("expected %s in postgres console payload after restore, got %+v", workflowID, console.Workflows)
+}
+
 func TestRuntimeAppConsoleReturnsForbiddenWhenConsoleReadAuthorizationDenies(t *testing.T) {
 	t.Parallel()
 
@@ -3034,6 +3240,149 @@ func TestRuntimeAppRestartReloadsPersistedRBACSnapshotAndIdentities(t *testing.T
 	last := entries[len(entries)-1]
 	if last.Actor != "config-operator" || last.Action != "config.update" || last.Permission != "plugin:config" || last.Target != "plugin-echo" || !last.Allowed || last.Reason != "plugin_config_updated" {
 		t.Fatalf("expected allowed config audit after restart, got %+v", last)
+	}
+}
+
+func TestRuntimeAppPostgresSelectedOperatorWritePathsPersistControlStateAndDeleteSchedules(t *testing.T) {
+	dir := t.TempDir()
+	configPath := writeWriteActionRBACConfigWithPostgresSmokeStoreAt(t, dir, runtimePostgresTestDSN(t))
+
+	app, err := newRuntimeApp(configPath)
+	if err != nil {
+		t.Fatalf("new runtime app with postgres operator config: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	postgresStore, ok := app.runtimeState.(*runtimecore.PostgresStore)
+	if !ok {
+		t.Fatalf("expected postgres runtime state for operator matrix, got %T", app.runtimeState)
+	}
+
+	configReq := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/config", strings.NewReader(`{"prefix":"postgres persisted: "}`))
+	configReq.Header.Set("Content-Type", "application/json")
+	configReq.Header.Set(runtimecore.ConsoleReadActorHeader, "config-operator")
+	configResp := httptest.NewRecorder()
+	app.ServeHTTP(configResp, configReq)
+	if configResp.Code != http.StatusOK {
+		t.Fatalf("expected postgres config operator 200, got %d: %s", configResp.Code, configResp.Body.String())
+	}
+	for _, expected := range []string{`"status":"ok"`, `"action":"config.update"`, `"target":"plugin-echo"`, `"accepted":true`, `"reason":"plugin_config_updated"`, `"plugin_id":"plugin-echo"`} {
+		if !strings.Contains(configResp.Body.String(), expected) && !strings.Contains(configResp.Body.String(), strings.ReplaceAll(expected, `:`, `: `)) {
+			t.Fatalf("expected postgres config response to include %s, got %s", expected, configResp.Body.String())
+		}
+	}
+
+	configState, err := postgresStore.LoadPluginConfig(t.Context(), "plugin-echo")
+	if err != nil {
+		t.Fatalf("load postgres plugin config: %v", err)
+	}
+	if string(configState.RawConfig) != `{"prefix":"postgres persisted: "}` {
+		t.Fatalf("expected postgres plugin config persistence, got %s", string(configState.RawConfig))
+	}
+	if _, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo"); err == nil {
+		t.Fatal("expected sqlite plugin config table to stay empty under postgres selection")
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-postgres-cancel","delay_ms":60000,"message":"cancel in postgres"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp := httptest.NewRecorder()
+	app.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("expected postgres schedule create 200, got %d: %s", createResp.Code, createResp.Body.String())
+	}
+	if _, err := postgresStore.LoadSchedulePlan(t.Context(), "schedule-postgres-cancel"); err != nil {
+		t.Fatalf("load postgres schedule before cancel: %v", err)
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-postgres-cancel/cancel", nil)
+	cancelReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
+	cancelResp := httptest.NewRecorder()
+	app.ServeHTTP(cancelResp, cancelReq)
+	if cancelResp.Code != http.StatusOK {
+		t.Fatalf("expected postgres cancel operator 200, got %d: %s", cancelResp.Code, cancelResp.Body.String())
+	}
+	for _, expected := range []string{`"status":"ok"`, `"schedule_id":"schedule-postgres-cancel"`, `"action":"cancel"`} {
+		if !strings.Contains(cancelResp.Body.String(), expected) && !strings.Contains(cancelResp.Body.String(), strings.ReplaceAll(expected, `:`, `: `)) {
+			t.Fatalf("expected postgres cancel response to include %s, got %s", expected, cancelResp.Body.String())
+		}
+	}
+	if _, err := postgresStore.LoadSchedulePlan(t.Context(), "schedule-postgres-cancel"); err == nil {
+		t.Fatal("expected cancelled postgres schedule to be deleted from selected backend")
+	}
+	if _, err := app.state.LoadSchedulePlan(t.Context(), "schedule-postgres-cancel"); err == nil {
+		t.Fatal("expected sqlite schedule table to stay empty under postgres selection")
+	}
+
+	counts, err := app.runtimeStateCounts(t.Context())
+	if err != nil {
+		t.Fatalf("runtime state counts after postgres operator writes: %v", err)
+	}
+	if counts["plugin_configs"] != 1 {
+		t.Fatalf("expected postgres control state to persist one plugin config, got %+v", counts)
+	}
+	if counts["schedule_plans"] != 0 {
+		t.Fatalf("expected postgres schedule count to return to zero after cancel, got %+v", counts)
+	}
+	sqliteCounts, err := app.state.Counts(t.Context())
+	if err != nil {
+		t.Fatalf("sqlite counts after postgres operator writes: %v", err)
+	}
+	if sqliteCounts["plugin_configs"] != 0 || sqliteCounts["schedule_plans"] != 0 {
+		t.Fatalf("expected sqlite control/runtime tables to stay empty under postgres operator paths, got %+v", sqliteCounts)
+	}
+
+	console := readRuntimeConsoleResponseAsViewer(t, app, "/api/console?plugin_id=plugin-echo")
+	if got := consoleMetaString(t, console.Meta, "plugin_config_read_model"); got != "postgres-plugin-config" {
+		t.Fatalf("expected plugin_config_read_model=postgres-plugin-config, got %q", got)
+	}
+	if got := consoleMetaString(t, console.Meta, "schedule_read_model"); got != "postgres" {
+		t.Fatalf("expected schedule_read_model=postgres, got %q", got)
+	}
+	if got := consoleMetaString(t, console.Meta, "schedule_status_source"); got != "postgres-schedule-plans" {
+		t.Fatalf("expected schedule_status_source=postgres-schedule-plans, got %q", got)
+	}
+	pluginFound := false
+	for _, plugin := range console.Plugins {
+		if plugin.ID != "plugin-echo" {
+			continue
+		}
+		pluginFound = true
+		if plugin.ConfigStateKind != "plugin-owned-persisted-input" || plugin.ConfigSource != "postgres-plugin-config" || !plugin.ConfigPersisted || plugin.ConfigUpdatedAt == "" {
+			t.Fatalf("expected postgres console plugin config provenance, got %+v", plugin)
+		}
+	}
+	if !pluginFound {
+		t.Fatalf("expected plugin-echo in postgres console payload, got %+v", console.Plugins)
+	}
+	consoleReq := consoleRequestWithViewer("/api/console?plugin_id=plugin-echo")
+	consoleResp := httptest.NewRecorder()
+	app.ServeHTTP(consoleResp, consoleReq)
+	if consoleResp.Code != http.StatusOK {
+		t.Fatalf("expected filtered postgres console 200, got %d: %s", consoleResp.Code, consoleResp.Body.String())
+	}
+	if !strings.Contains(consoleResp.Body.String(), `"prefix": "postgres persisted: "`) && !strings.Contains(consoleResp.Body.String(), `"prefix":"postgres persisted: "`) {
+		t.Fatalf("expected postgres console payload to expose persisted plugin config value, got %s", consoleResp.Body.String())
+	}
+	if hasConsoleSchedule(console, "schedule-postgres-cancel") {
+		t.Fatalf("expected cancelled postgres schedule to disappear from console read model, got %+v", console.Schedules)
+	}
+
+	audits := app.audits.AuditEntries()
+	if len(audits) < 2 {
+		t.Fatalf("expected postgres operator writes to record audit evidence, got %+v", audits)
+	}
+	configAuditFound := false
+	cancelAuditFound := false
+	for _, entry := range audits {
+		if entry.Actor == "config-operator" && entry.Action == "config.update" && entry.Permission == "plugin:config" && entry.Target == "plugin-echo" && entry.Allowed && entry.Reason == "plugin_config_updated" {
+			configAuditFound = true
+		}
+		if entry.Actor == "schedule-admin" && entry.Action == "cancel" && entry.Permission == "schedule:cancel" && entry.Target == "schedule-postgres-cancel" && entry.Allowed && entry.Reason == "schedule_cancelled" {
+			cancelAuditFound = true
+		}
+	}
+	if !configAuditFound || !cancelAuditFound {
+		t.Fatalf("expected postgres operator audit entries for config+cancel, got %+v", audits)
 	}
 }
 
