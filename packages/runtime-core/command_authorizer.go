@@ -289,7 +289,10 @@ func (a *ConsoleReadAuthorizer) AuthorizeConsoleRead(_ context.Context, request 
 	if permission == "" {
 		return nil
 	}
-	actor := strings.TrimSpace(request.Header.Get(ConsoleReadActorHeader))
+	actor, err := RequestActorID(request.Context(), false, request.Header.Get(ConsoleReadActorHeader))
+	if err != nil {
+		return err
+	}
 	decision := snapshot.Authorizer.Authorize(actor, permission, consoleReadTarget)
 	if decision.Allowed {
 		return nil
