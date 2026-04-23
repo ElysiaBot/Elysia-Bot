@@ -82,6 +82,11 @@ func ApplyAuditExecutionContext(entry *pluginsdk.AuditEntry, ctx eventmodel.Exec
 	if strings.TrimSpace(entry.RunID) == "" {
 		entry.RunID = strings.TrimSpace(ctx.RunID)
 	}
+	if strings.TrimSpace(entry.SessionID) == "" && ctx.Metadata != nil {
+		if sessionID, ok := ctx.Metadata["session_id"].(string); ok {
+			entry.SessionID = strings.TrimSpace(sessionID)
+		}
+	}
 	if strings.TrimSpace(entry.CorrelationID) == "" {
 		entry.CorrelationID = strings.TrimSpace(ctx.CorrelationID)
 	}

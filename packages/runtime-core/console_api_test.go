@@ -108,6 +108,9 @@ func TestConsoleAPIExposesReadOnlySystemState(t *testing.T) {
 	if len(api.Audits()) != 1 || api.Audits()[0].Actor != "admin-user" || api.Audits()[0].TraceID != "trace-console-audit" || api.Audits()[0].EventID != "evt-console-audit" || api.Audits()[0].PluginID != "plugin-echo" || api.Audits()[0].RunID != "run-console-audit" || api.Audits()[0].CorrelationID != "corr-console-audit" || api.Audits()[0].ErrorCategory != "operator" || api.Audits()[0].ErrorCode != "rollout_prepared" {
 		t.Fatalf("expected console audits to expose audit trail, got %+v", api.Audits())
 	}
+	if api.Audits()[0].SessionID != "" {
+		t.Fatalf("expected explicit empty session_id to remain empty for legacy audit, got %+v", api.Audits()[0])
+	}
 	if len(api.Logs("plugin-echo")) != 1 {
 		t.Fatalf("expected log query to filter logs, got %+v", api.Logs("plugin-echo"))
 	}
@@ -156,6 +159,7 @@ func TestConsoleAPIReadsPersistedSQLiteAuditsWithObservabilityFields(t *testing.
 		EventID:       "evt-console-store",
 		PluginID:      "plugin-ai-chat",
 		RunID:         "run-console-store",
+		SessionID:     "session-operator-bearer-job-operator",
 		CorrelationID: "corr-console-store",
 		ErrorCategory: "operator",
 		ErrorCode:     "job_dead_letter_retried",
@@ -174,7 +178,7 @@ func TestConsoleAPIReadsPersistedSQLiteAuditsWithObservabilityFields(t *testing.
 	if err != nil {
 		t.Fatalf("render json: %v", err)
 	}
-	for _, expected := range []string{`"trace_id": "trace-console-store"`, `"event_id": "evt-console-store"`, `"plugin_id": "plugin-ai-chat"`, `"run_id": "run-console-store"`, `"correlation_id": "corr-console-store"`, `"error_category": "operator"`, `"error_code": "job_dead_letter_retried"`} {
+	for _, expected := range []string{`"trace_id": "trace-console-store"`, `"event_id": "evt-console-store"`, `"plugin_id": "plugin-ai-chat"`, `"run_id": "run-console-store"`, `"session_id": "session-operator-bearer-job-operator"`, `"correlation_id": "corr-console-store"`, `"error_category": "operator"`, `"error_code": "job_dead_letter_retried"`} {
 		if !strings.Contains(raw, expected) {
 			t.Fatalf("expected persisted console audit JSON to include %q, got %s", expected, raw)
 		}
@@ -1126,6 +1130,44 @@ func TestConsoleAPIReturnsForbiddenWhenConsoleReadAuthorizerDenies(t *testing.T)
 	}
 	if entries[0].Actor != "" {
 		t.Fatalf("expected denied audit entry to preserve missing actor header as empty, got %+v", entries[0])
+	}
+}
+
+func TestConsoleAPIDeniedAuditCopiesRequestIdentitySessionID(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{RBAC: &RBACConfig{
+		ConsoleReadPermission: "console:read",
+		ActorRoles:            map[string][]string{"viewer-user": {"console-viewer"}},
+		Policies: map[string]pluginsdk.AuthorizationPolicy{
+			"console-viewer": {
+				Permissions: []string{"console:read"},
+				PluginScope: []string{"console"},
+			},
+		},
+	}}, []string{"runtime started"}, audits)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request = request.WithContext(WithRequestIdentityContext(request.Context(), RequestIdentityContext{
+		ActorID:    "bearer-admin",
+		TokenID:    "console-main",
+		AuthMethod: RequestIdentityAuthMethodBearer,
+		SessionID:  OperatorBearerSessionID("bearer-admin"),
+	}))
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	entries := audits.AuditEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected one deny audit entry, got %+v", entries)
+	}
+	if entries[0].Actor != "bearer-admin" || entries[0].SessionID != OperatorBearerSessionID("bearer-admin") {
+		t.Fatalf("expected request identity fields in console deny audit, got %+v", entries[0])
 	}
 }
 

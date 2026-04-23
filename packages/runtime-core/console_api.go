@@ -339,22 +339,22 @@ type sqliteConsoleScheduleReader struct {
 }
 
 type sqliteConsoleAdapterInstanceReader struct {
-	store AdapterInstanceStateStore
+	store  AdapterInstanceStateStore
 	source string
 }
 
 type sqliteConsolePluginSnapshotReader struct {
-	store PluginStatusSnapshotStore
+	store  PluginStatusSnapshotStore
 	source string
 }
 
 type sqliteConsolePluginEnabledStateReader struct {
-	store PluginEnabledStateStore
+	store  PluginEnabledStateStore
 	source string
 }
 
 type sqliteConsolePluginConfigReader struct {
-	store PluginConfigStateStore
+	store  PluginConfigStateStore
 	source string
 }
 
@@ -363,7 +363,7 @@ type sqliteConsoleJobReader struct {
 }
 
 type sqliteConsoleWorkflowReader struct {
-	store workflowRuntimeStore
+	store  workflowRuntimeStore
 	source string
 }
 
@@ -374,7 +374,7 @@ type sqliteConsoleAlertReader struct {
 }
 
 type sqliteConsoleReplayOperationReader struct {
-	store ReplayOperationStateStore
+	store  ReplayOperationStateStore
 	source string
 }
 
@@ -2217,6 +2217,7 @@ func (c *ConsoleAPI) recordConsoleReadDenied(r *http.Request, err error) {
 		OccurredAt:    time.Now().UTC().Format(time.RFC3339),
 	}
 	setAuditEntryReason(&entry, authorizationDeniedAuditReason(err))
+	ApplyAuditRequestIdentity(&entry, r.Context())
 	_ = recorder.RecordAudit(entry)
 }
 

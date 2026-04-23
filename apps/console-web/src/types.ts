@@ -205,6 +205,7 @@ export type AuditEntry = {
   event_id?: string;
   plugin_id?: string;
   run_id?: string;
+  session_id?: string;
   correlation_id?: string;
   error_category?: string;
   error_code?: string;

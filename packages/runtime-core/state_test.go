@@ -102,6 +102,7 @@ func TestSQLiteStateStorePersistsAuditEntriesWithObservabilityFieldsAcrossReopen
 		EventID:       "evt-audit-1",
 		PluginID:      "plugin-ai-chat",
 		RunID:         "run-audit-1",
+		SessionID:     "session-operator-bearer-job-operator",
 		CorrelationID: "corr-audit-1",
 		ErrorCategory: "operator",
 		ErrorCode:     "job_dead_letter_retried",
@@ -146,6 +147,71 @@ func TestSQLiteStateStorePersistsAuditEntriesWithObservabilityFieldsAcrossReopen
 	viaReader := reopened.AuditEntries()
 	if len(viaReader) != 1 || viaReader[0] != entry {
 		t.Fatalf("expected audit reader path to expose persisted entry, got %+v", viaReader)
+	}
+}
+
+func TestSQLiteStateStoreSessionRoundTripsAcrossReopen(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	ctx := context.Background()
+	want := SessionState{
+		SessionID: OperatorBearerSessionID("admin-user"),
+		PluginID:  OperatorAuthSessionPluginID,
+		State: map[string]any{
+			"actor_id":    "admin-user",
+			"token_id":    "console-main",
+			"auth_method": RequestIdentityAuthMethodBearer,
+		},
+	}
+
+	store, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.SaveSession(ctx, want); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+	loadedBeforeClose, err := store.LoadSession(ctx, want.SessionID)
+	if err != nil {
+		t.Fatalf("load session before close: %v", err)
+	}
+	if loadedBeforeClose.SessionID != want.SessionID || loadedBeforeClose.PluginID != want.PluginID {
+		t.Fatalf("unexpected loaded session before close %+v", loadedBeforeClose)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reopened, err := OpenSQLiteStateStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+
+	loaded, err := reopened.LoadSession(ctx, want.SessionID)
+	if err != nil {
+		t.Fatalf("load session after reopen: %v", err)
+	}
+	if loaded.SessionID != want.SessionID || loaded.PluginID != want.PluginID {
+		t.Fatalf("unexpected reopened session identity %+v", loaded)
+	}
+	if loaded.State["actor_id"] != want.State["actor_id"] || loaded.State["token_id"] != want.State["token_id"] || loaded.State["auth_method"] != want.State["auth_method"] {
+		t.Fatalf("unexpected reopened session state %+v", loaded.State)
+	}
+	listed, err := reopened.ListSessions(ctx)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionID != want.SessionID || listed[0].PluginID != want.PluginID {
+		t.Fatalf("expected one reopened session, got %+v", listed)
+	}
+	counts, err := reopened.Counts(ctx)
+	if err != nil {
+		t.Fatalf("counts after reopen: %v", err)
+	}
+	if counts["sessions"] != 1 {
+		t.Fatalf("expected one persisted session row, got %+v", counts)
 	}
 }
 

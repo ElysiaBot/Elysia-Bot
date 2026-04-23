@@ -41,6 +41,8 @@ type PluginStatusSnapshotStore interface {
 
 type SessionStateStore interface {
 	SaveSession(context.Context, SessionState) error
+	LoadSession(context.Context, string) (SessionState, error)
+	ListSessions(context.Context) ([]SessionState, error)
 }
 
 type AdapterInstanceStateStore interface {

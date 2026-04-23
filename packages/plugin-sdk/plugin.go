@@ -391,6 +391,7 @@ type AuditEntry struct {
 	EventID       string `json:"event_id,omitempty"`
 	PluginID      string `json:"plugin_id,omitempty"`
 	RunID         string `json:"run_id,omitempty"`
+	SessionID     string `json:"session_id,omitempty"`
 	CorrelationID string `json:"correlation_id,omitempty"`
 	ErrorCategory string `json:"error_category,omitempty"`
 	ErrorCode     string `json:"error_code,omitempty"`

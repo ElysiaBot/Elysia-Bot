@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   event_id TEXT NOT NULL DEFAULT '',
   plugin_id TEXT NOT NULL DEFAULT '',
   run_id TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
   correlation_id TEXT NOT NULL DEFAULT '',
   error_category TEXT NOT NULL DEFAULT '',
   error_code TEXT NOT NULL DEFAULT '',
@@ -363,6 +364,9 @@ func (s *SQLiteStateStore) Init(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("add jobs heartbeat_at column: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add audit session_id column: %w", err)
 	}
 	return nil
 }
@@ -895,6 +899,39 @@ ON CONFLICT(session_id) DO UPDATE SET
 	return nil
 }
 
+func (s *SQLiteStateStore) LoadSession(ctx context.Context, sessionID string) (SessionState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT session_id, plugin_id, state_json
+FROM sessions
+WHERE session_id = ?
+`, strings.TrimSpace(sessionID))
+	if err != nil {
+		return SessionState{}, fmt.Errorf("load session: %w", err)
+	}
+	defer rows.Close()
+	sessions, err := scanSessions(rows)
+	if err != nil {
+		return SessionState{}, err
+	}
+	if len(sessions) == 0 {
+		return SessionState{}, sql.ErrNoRows
+	}
+	return sessions[0], nil
+}
+
+func (s *SQLiteStateStore) ListSessions(ctx context.Context) ([]SessionState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT session_id, plugin_id, state_json
+FROM sessions
+ORDER BY session_id ASC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+	return scanSessions(rows)
+}
+
 func (s *SQLiteStateStore) SaveIdempotencyKey(ctx context.Context, key string, eventID string) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO idempotency_keys (idempotency_key, event_id, created_at)
@@ -1303,12 +1340,12 @@ func saveAuditWithExecutor(ctx context.Context, executor sqliteExecContexter, en
 	_, err = executor.ExecContext(ctx, `
 INSERT INTO audit_log (
   actor, permission, action, target, allowed, reason,
-  trace_id, event_id, plugin_id, run_id, correlation_id,
+	  trace_id, event_id, plugin_id, run_id, session_id, correlation_id,
   error_category, error_code, occurred_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, strings.TrimSpace(entry.Actor), strings.TrimSpace(entry.Permission), strings.TrimSpace(entry.Action), strings.TrimSpace(entry.Target), boolToSQLiteInt(entry.Allowed), strings.TrimSpace(auditEntryReason(entry)),
-		strings.TrimSpace(entry.TraceID), strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.PluginID), strings.TrimSpace(entry.RunID), strings.TrimSpace(entry.CorrelationID),
+		strings.TrimSpace(entry.TraceID), strings.TrimSpace(entry.EventID), strings.TrimSpace(entry.PluginID), strings.TrimSpace(entry.RunID), strings.TrimSpace(entry.SessionID), strings.TrimSpace(entry.CorrelationID),
 		strings.TrimSpace(entry.ErrorCategory), strings.TrimSpace(entry.ErrorCode), formatSQLiteTimestamp(occurredAt))
 	if err != nil {
 		return fmt.Errorf("insert audit: %w", err)
@@ -1322,7 +1359,7 @@ func (s *SQLiteStateStore) ListAudits(ctx context.Context) ([]pluginsdk.AuditEnt
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT actor, permission, action, target, allowed, reason,
-       trace_id, event_id, plugin_id, run_id, correlation_id,
+	       trace_id, event_id, plugin_id, run_id, session_id, correlation_id,
        error_category, error_code, occurred_at
 FROM audit_log
 ORDER BY occurred_at ASC, rowid ASC
@@ -1904,6 +1941,7 @@ func scanAuditEntries(rows *sql.Rows) ([]pluginsdk.AuditEntry, error) {
 			&entry.EventID,
 			&entry.PluginID,
 			&entry.RunID,
+			&entry.SessionID,
 			&entry.CorrelationID,
 			&entry.ErrorCategory,
 			&entry.ErrorCode,
@@ -1924,6 +1962,32 @@ func scanAuditEntries(rows *sql.Rows) ([]pluginsdk.AuditEntry, error) {
 		return nil, fmt.Errorf("iterate audits: %w", err)
 	}
 	return entries, nil
+}
+
+func scanSessions(rows *sql.Rows) ([]SessionState, error) {
+	sessions := make([]SessionState, 0)
+	for rows.Next() {
+		var (
+			session   SessionState
+			stateJSON string
+		)
+		if err := rows.Scan(&session.SessionID, &session.PluginID, &stateJSON); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		if stateJSON != "" && stateJSON != "null" {
+			if err := json.Unmarshal([]byte(stateJSON), &session.State); err != nil {
+				return nil, fmt.Errorf("unmarshal session state: %w", err)
+			}
+		}
+		if session.State == nil {
+			session.State = map[string]any{}
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	return sessions, nil
 }
 
 func scanStoredSchedulePlans(rows *sql.Rows) ([]storedSchedulePlan, error) {

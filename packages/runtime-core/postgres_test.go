@@ -142,14 +142,16 @@ func (p *fakePostgresPool) Close() {
 	p.closed = true
 }
 
-func (tx *fakePostgresTx) Begin(context.Context) (pgx.Tx, error)                   { return nil, errors.New("nested begin not implemented") }
-func (tx *fakePostgresTx) Commit(context.Context) error                            { tx.committed = true; return tx.execErr }
-func (tx *fakePostgresTx) Rollback(context.Context) error                          { tx.rolledBack = true; return nil }
+func (tx *fakePostgresTx) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("nested begin not implemented")
+}
+func (tx *fakePostgresTx) Commit(context.Context) error   { tx.committed = true; return tx.execErr }
+func (tx *fakePostgresTx) Rollback(context.Context) error { tx.rolledBack = true; return nil }
 func (tx *fakePostgresTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
 	return 0, errors.New("copy from not implemented")
 }
 func (tx *fakePostgresTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
-func (tx *fakePostgresTx) LargeObjects() pgx.LargeObjects                          { return pgx.LargeObjects{} }
+func (tx *fakePostgresTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
 func (tx *fakePostgresTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
 	return nil, errors.New("prepare not implemented")
 }
@@ -207,6 +209,7 @@ func TestPostgresStoreSaveMethodsIssueExpectedWrites(t *testing.T) {
 		EventID:       "evt-pg-audit",
 		PluginID:      "plugin-echo",
 		RunID:         "run-pg-audit",
+		SessionID:     "session-operator-bearer-admin-user",
 		CorrelationID: "corr-pg-audit",
 		ErrorCategory: "operator",
 		ErrorCode:     "rollout_prepared",
@@ -317,7 +320,7 @@ func TestPostgresStoreSaveMethodsIssueExpectedWrites(t *testing.T) {
 	if len(pool.execArgs[4]) != 3 || pool.execArgs[4][0] != "idem-1" || pool.execArgs[4][1] != event.EventID {
 		t.Fatalf("unexpected idempotency exec args %+v", pool.execArgs[4])
 	}
-	if len(pool.execArgs[5]) != 14 || pool.execArgs[5][1] != "plugin:enable" || pool.execArgs[5][5] != "rollout_prepared" || pool.execArgs[5][6] != "trace-pg-audit" || pool.execArgs[5][7] != "evt-pg-audit" || pool.execArgs[5][8] != "plugin-echo" || pool.execArgs[5][9] != "run-pg-audit" || pool.execArgs[5][10] != "corr-pg-audit" || pool.execArgs[5][11] != "operator" || pool.execArgs[5][12] != "rollout_prepared" {
+	if len(pool.execArgs[5]) != 15 || pool.execArgs[5][1] != "plugin:enable" || pool.execArgs[5][5] != "rollout_prepared" || pool.execArgs[5][6] != "trace-pg-audit" || pool.execArgs[5][7] != "evt-pg-audit" || pool.execArgs[5][8] != "plugin-echo" || pool.execArgs[5][9] != "run-pg-audit" || pool.execArgs[5][10] != "session-operator-bearer-admin-user" || pool.execArgs[5][11] != "corr-pg-audit" || pool.execArgs[5][12] != "operator" || pool.execArgs[5][13] != "rollout_prepared" {
 		t.Fatalf("unexpected audit exec args %+v", pool.execArgs[5])
 	}
 }
@@ -503,6 +506,8 @@ func TestPostgresStoreControlStateReadbacks(t *testing.T) {
 	recoveredAt := updatedAt.Add(2 * time.Minute)
 	pool := &fakePostgresPool{queryRowFunc: func(_ context.Context, query string, _ ...any) pgx.Row {
 		switch {
+		case strings.Contains(query, "FROM sessions_pg"):
+			return fakeRow{values: []any{OperatorBearerSessionID("viewer-user"), OperatorAuthSessionPluginID, []byte(`{"actor_id":"viewer-user","token_id":"console-viewer","auth_method":"bearer"}`)}}
 		case strings.Contains(query, "FROM plugin_enabled_overlays_pg"):
 			return fakeRow{values: []any{"plugin-echo", false, updatedAt}}
 		case strings.Contains(query, "FROM plugin_configs_pg"):
@@ -539,6 +544,10 @@ func TestPostgresStoreControlStateReadbacks(t *testing.T) {
 	if err != nil || adapter.InstanceID != "adapter-onebot-demo" || adapter.Adapter != "onebot" || !adapter.Online {
 		t.Fatalf("load adapter instance: state=%+v err=%v", adapter, err)
 	}
+	session, err := store.LoadSession(ctx, OperatorBearerSessionID("viewer-user"))
+	if err != nil || session.SessionID != OperatorBearerSessionID("viewer-user") || session.PluginID != OperatorAuthSessionPluginID || session.State["actor_id"] != "viewer-user" {
+		t.Fatalf("load session: state=%+v err=%v", session, err)
+	}
 	identity, err := store.LoadOperatorIdentity(ctx, "viewer-user")
 	if err != nil || identity.ActorID != "viewer-user" || len(identity.Roles) != 1 || identity.Roles[0] != "viewer" {
 		t.Fatalf("load operator identity: state=%+v err=%v", identity, err)
@@ -556,6 +565,8 @@ func TestPostgresStoreControlStateListReadbacks(t *testing.T) {
 	occurredAt := updatedAt.Add(-5 * time.Minute)
 	pool := &fakePostgresPool{queryFunc: func(_ context.Context, query string, _ ...any) (pgx.Rows, error) {
 		switch {
+		case strings.Contains(query, "FROM sessions_pg"):
+			return &fakeRows{rows: [][]any{{OperatorBearerSessionID("viewer-user"), OperatorAuthSessionPluginID, []byte(`{"actor_id":"viewer-user","token_id":"console-viewer","auth_method":"bearer"}`)}}}, nil
 		case strings.Contains(query, "FROM plugin_enabled_overlays_pg"):
 			return &fakeRows{rows: [][]any{{"plugin-echo", false, updatedAt}}}, nil
 		case strings.Contains(query, "FROM plugin_configs_pg"):
@@ -572,7 +583,7 @@ func TestPostgresStoreControlStateListReadbacks(t *testing.T) {
 		case strings.Contains(query, "FROM rollout_operation_records_pg"):
 			return &fakeRows{rows: [][]any{{"rollout-op-1", "plugin-echo", "prepare", "0.1.0", "0.2.0-candidate", "prepared", "", occurredAt, updatedAt}}}, nil
 		case strings.Contains(query, "FROM audit_log"):
-			return &fakeRows{rows: [][]any{{"admin-user", "plugin:enable", "enable", "plugin-echo", true, stdsql.NullString{String: "rollout_prepared", Valid: true}, "trace-1", "evt-1", "plugin-echo", "run-1", "corr-1", "operator", "rollout_prepared", updatedAt}}}, nil
+			return &fakeRows{rows: [][]any{{"admin-user", "plugin:enable", "enable", "plugin-echo", true, stdsql.NullString{String: "rollout_prepared", Valid: true}, "trace-1", "evt-1", "plugin-echo", "run-1", "session-operator-bearer-admin-user", "corr-1", "operator", "rollout_prepared", updatedAt}}}, nil
 		default:
 			return nil, errors.New("unexpected query")
 		}
@@ -580,6 +591,10 @@ func TestPostgresStoreControlStateListReadbacks(t *testing.T) {
 	store := &PostgresStore{pool: pool}
 	ctx := context.Background()
 
+	sessions, err := store.ListSessions(ctx)
+	if err != nil || len(sessions) != 1 || sessions[0].SessionID != OperatorBearerSessionID("viewer-user") || sessions[0].PluginID != OperatorAuthSessionPluginID || sessions[0].State["token_id"] != "console-viewer" {
+		t.Fatalf("list sessions: states=%+v err=%v", sessions, err)
+	}
 	enabledStates, err := store.ListPluginEnabledStates(ctx)
 	if err != nil || len(enabledStates) != 1 || enabledStates[0].PluginID != "plugin-echo" {
 		t.Fatalf("list plugin enabled states: states=%+v err=%v", enabledStates, err)
@@ -609,7 +624,7 @@ func TestPostgresStoreControlStateListReadbacks(t *testing.T) {
 		t.Fatalf("list rollout operation records: states=%+v err=%v", rolloutRecords, err)
 	}
 	audits, err := store.ListAudits(ctx)
-	if err != nil || len(audits) != 1 || audits[0].Reason != "rollout_prepared" {
+	if err != nil || len(audits) != 1 || audits[0].Reason != "rollout_prepared" || audits[0].SessionID != "session-operator-bearer-admin-user" {
 		t.Fatalf("list audits: states=%+v err=%v", audits, err)
 	}
 	if len(store.AuditEntries()) != 1 || store.AuditEntries()[0].Action != "enable" {
@@ -681,7 +696,7 @@ func TestPostgresStoreInitAndCloseDelegateToPool(t *testing.T) {
 	if err := store.Init(context.Background()); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	if len(pool.execSQL) != 1 || !strings.Contains(pool.execSQL[0], "CREATE TABLE IF NOT EXISTS event_log") {
+	if len(pool.execSQL) != 2 || !strings.Contains(pool.execSQL[0], "CREATE TABLE IF NOT EXISTS event_log") || !strings.Contains(pool.execSQL[1], "ALTER TABLE audit_log ADD COLUMN session_id") {
 		t.Fatalf("expected init to execute schema, got %+v", pool.execSQL)
 	}
 	store.Close()

@@ -231,6 +231,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   event_id TEXT NOT NULL,
   plugin_id TEXT NOT NULL,
   run_id TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
   correlation_id TEXT NOT NULL,
   error_category TEXT NOT NULL,
   error_code TEXT NOT NULL,
@@ -292,6 +293,9 @@ func (s *PostgresStore) Init(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, PostgresSchemaV0)
 	if err != nil {
 		return fmt.Errorf("init postgres schema: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `ALTER TABLE audit_log ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil && !isPostgresDuplicateColumnError(err) {
+		return fmt.Errorf("add postgres audit session_id column: %w", err)
 	}
 	return nil
 }
@@ -616,6 +620,35 @@ ON CONFLICT (session_id) DO UPDATE SET
 		return fmt.Errorf("upsert session: %w", err)
 	}
 	return nil
+}
+
+func (s *PostgresStore) LoadSession(ctx context.Context, sessionID string) (SessionState, error) {
+	row := s.pool.QueryRow(ctx, `
+SELECT session_id, plugin_id, state_json
+FROM sessions_pg
+WHERE session_id = $1
+`, strings.TrimSpace(sessionID))
+	session, err := scanPostgresSession(row)
+	if err != nil {
+		if isPostgresNoRows(err) {
+			return SessionState{}, sql.ErrNoRows
+		}
+		return SessionState{}, fmt.Errorf("load session: %w", err)
+	}
+	return session, nil
+}
+
+func (s *PostgresStore) ListSessions(ctx context.Context) ([]SessionState, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT session_id, plugin_id, state_json
+FROM sessions_pg
+ORDER BY session_id ASC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	defer rows.Close()
+	return scanPostgresSessions(rows)
 }
 
 func (s *PostgresStore) SaveAdapterInstance(ctx context.Context, state AdapterInstanceState) error {
@@ -1276,8 +1309,8 @@ func (s *PostgresStore) SaveAudit(ctx context.Context, entry pluginsdk.AuditEntr
 	if err != nil {
 		return fmt.Errorf("parse audit occurred_at: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO audit_log (actor, permission, action, target, allowed, reason, trace_id, event_id, plugin_id, run_id, correlation_id, error_category, error_code, occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-		entry.Actor, entry.Permission, entry.Action, entry.Target, entry.Allowed, auditEntryReason(entry), entry.TraceID, entry.EventID, entry.PluginID, entry.RunID, entry.CorrelationID, entry.ErrorCategory, entry.ErrorCode, occurredAt.UTC())
+	_, err = s.pool.Exec(ctx, `INSERT INTO audit_log (actor, permission, action, target, allowed, reason, trace_id, event_id, plugin_id, run_id, session_id, correlation_id, error_category, error_code, occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		entry.Actor, entry.Permission, entry.Action, entry.Target, entry.Allowed, auditEntryReason(entry), entry.TraceID, entry.EventID, entry.PluginID, entry.RunID, entry.SessionID, entry.CorrelationID, entry.ErrorCategory, entry.ErrorCode, occurredAt.UTC())
 	return err
 }
 
@@ -1288,7 +1321,7 @@ func (s *PostgresStore) RecordAudit(entry pluginsdk.AuditEntry) error {
 func (s *PostgresStore) ListAudits(ctx context.Context) ([]pluginsdk.AuditEntry, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT actor, permission, action, target, allowed, reason,
-       trace_id, event_id, plugin_id, run_id, correlation_id,
+	       trace_id, event_id, plugin_id, run_id, session_id, correlation_id,
        error_category, error_code, occurred_at
 FROM audit_log
 ORDER BY occurred_at ASC, actor ASC, action ASC, target ASC
@@ -1571,13 +1604,13 @@ func scanPostgresAlerts(rows postgresRows) ([]AlertRecord, error) {
 
 func scanPostgresStoredSchedulePlan(row rowScanner) (storedSchedulePlan, error) {
 	var (
-		stored     storedSchedulePlan
-		kind       string
-		delayMS    int64
-		executeAt  sql.NullTime
-		dueAt      sql.NullTime
-		claimedAt  sql.NullTime
-		metadata   []byte
+		stored    storedSchedulePlan
+		kind      string
+		delayMS   int64
+		executeAt sql.NullTime
+		dueAt     sql.NullTime
+		claimedAt sql.NullTime
+		metadata  []byte
 	)
 	if err := row.Scan(
 		&stored.Plan.ID,
@@ -1735,6 +1768,40 @@ func scanPostgresAdapterInstances(rows postgresRows) ([]AdapterInstanceState, er
 	return states, nil
 }
 
+func scanPostgresSession(row rowScanner) (SessionState, error) {
+	var (
+		session   SessionState
+		stateJSON []byte
+	)
+	if err := row.Scan(&session.SessionID, &session.PluginID, &stateJSON); err != nil {
+		return SessionState{}, err
+	}
+	if len(stateJSON) > 0 && string(stateJSON) != "null" {
+		if err := json.Unmarshal(stateJSON, &session.State); err != nil {
+			return SessionState{}, fmt.Errorf("unmarshal session state: %w", err)
+		}
+	}
+	if session.State == nil {
+		session.State = map[string]any{}
+	}
+	return session, nil
+}
+
+func scanPostgresSessions(rows postgresRows) ([]SessionState, error) {
+	sessions := make([]SessionState, 0)
+	for rows.Next() {
+		session, err := scanPostgresSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	return sessions, nil
+}
+
 func scanPostgresOperatorIdentity(row rowScanner) (OperatorIdentityState, error) {
 	var state OperatorIdentityState
 	var rolesJSON []byte
@@ -1850,6 +1917,7 @@ func scanPostgresAuditEntry(row rowScanner) (pluginsdk.AuditEntry, error) {
 		&entry.EventID,
 		&entry.PluginID,
 		&entry.RunID,
+		&entry.SessionID,
 		&entry.CorrelationID,
 		&entry.ErrorCategory,
 		&entry.ErrorCode,
@@ -1911,4 +1979,12 @@ func postgresNullTimeValue(value sql.NullTime) time.Time {
 
 func isPostgresNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+func isPostgresDuplicateColumnError(err error) bool {
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "42701"
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "already exists") || strings.Contains(strings.ToLower(err.Error()), "duplicate column")
 }

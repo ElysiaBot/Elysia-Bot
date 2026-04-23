@@ -173,6 +173,29 @@ func TestPluginAdminExecutesEnableDisableCommands(t *testing.T) {
 	}
 }
 
+func TestPluginAdminCopiesSessionIDFromCommandMetadataIntoAudit(t *testing.T) {
+	t.Parallel()
+
+	audit := &auditRecorder{}
+	plugin := New(&lifecycleRecorder{}, nil, nil, nil, map[string][]string{"admin-user": {"admin"}}, adminPolicies(), audit)
+	if err := plugin.OnCommand(eventmodel.CommandInvocation{
+		Name: "admin",
+		Raw:  "/admin enable plugin-echo",
+		Metadata: map[string]any{
+			"actor":      "admin-user",
+			"session_id": "session-operator-bearer-admin-user",
+		},
+	}, eventmodel.ExecutionContext{TraceID: "trace-session", EventID: "evt-session"}); err != nil {
+		t.Fatalf("enable command with session metadata: %v", err)
+	}
+	if len(plugin.AuditLog()) != 1 || plugin.AuditLog()[0].SessionID != "session-operator-bearer-admin-user" {
+		t.Fatalf("expected local audit to include session_id, got %+v", plugin.AuditLog())
+	}
+	if len(audit.entries) != 1 || audit.entries[0].SessionID != "session-operator-bearer-admin-user" {
+		t.Fatalf("expected external audit to include session_id, got %+v", audit.entries)
+	}
+}
+
 func TestPluginAdminRejectsUnauthorizedActorAndAudits(t *testing.T) {
 	t.Parallel()
 

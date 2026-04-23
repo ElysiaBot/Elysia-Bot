@@ -3,6 +3,8 @@ package runtimecore
 import (
 	"context"
 	"testing"
+
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 )
 
 func TestOperatorBearerIdentityResolverResolvesConfiguredTokenToRequestIdentityContext(t *testing.T) {
@@ -78,5 +80,63 @@ func TestRequestIdentityContextRoundTripsThroughContext(t *testing.T) {
 	}
 	if empty := RequestIdentityContextFromContext(context.Background()); empty != (RequestIdentityContext{}) {
 		t.Fatalf("expected empty context identity from bare context, got %+v", empty)
+	}
+}
+
+func TestBindRequestIdentitySessionPersistsBearerIdentityIntoGenericSessionStore(t *testing.T) {
+	t.Parallel()
+
+	store := openTempSQLiteStore(t)
+	defer func() { _ = store.Close() }()
+
+	ctx := WithRequestIdentityContext(context.Background(), RequestIdentityContext{
+		ActorID:    "admin-user",
+		TokenID:    "console-main",
+		AuthMethod: RequestIdentityAuthMethodBearer,
+		SessionID:  OperatorBearerSessionID("admin-user"),
+	})
+	if err := BindRequestIdentitySession(ctx, store); err != nil {
+		t.Fatalf("bind request identity session: %v", err)
+	}
+
+	stored, err := store.LoadSession(context.Background(), OperatorBearerSessionID("admin-user"))
+	if err != nil {
+		t.Fatalf("load bound session: %v", err)
+	}
+	if stored.SessionID != OperatorBearerSessionID("admin-user") || stored.PluginID != OperatorAuthSessionPluginID {
+		t.Fatalf("unexpected bound session identity %+v", stored)
+	}
+	if stored.State["actor_id"] != "admin-user" || stored.State["token_id"] != "console-main" || stored.State["auth_method"] != RequestIdentityAuthMethodBearer {
+		t.Fatalf("unexpected bound session state %+v", stored.State)
+	}
+
+	listed, err := store.ListSessions(context.Background())
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SessionID != stored.SessionID {
+		t.Fatalf("expected one bound session in list, got %+v", listed)
+	}
+}
+
+func TestApplyAuditRequestIdentityCopiesSessionIDAndMissingActor(t *testing.T) {
+	t.Parallel()
+
+	ctx := WithRequestIdentityContext(context.Background(), RequestIdentityContext{
+		ActorID:    "admin-user",
+		TokenID:    "console-main",
+		AuthMethod: RequestIdentityAuthMethodBearer,
+		SessionID:  OperatorBearerSessionID("admin-user"),
+	})
+	entry := pluginsdk.AuditEntry{Action: "console.read", Target: "console", Allowed: false, OccurredAt: "2026-04-23T10:00:00Z"}
+	ApplyAuditRequestIdentity(&entry, ctx)
+	if entry.Actor != "admin-user" || entry.SessionID != OperatorBearerSessionID("admin-user") {
+		t.Fatalf("expected request identity to populate audit entry, got %+v", entry)
+	}
+
+	preserved := pluginsdk.AuditEntry{Actor: "viewer-user", SessionID: "session-custom", Action: "console.read", Target: "console", Allowed: false, OccurredAt: "2026-04-23T10:00:00Z"}
+	ApplyAuditRequestIdentity(&preserved, ctx)
+	if preserved.Actor != "viewer-user" || preserved.SessionID != "session-custom" {
+		t.Fatalf("expected explicit audit identity fields to be preserved, got %+v", preserved)
 	}
 }

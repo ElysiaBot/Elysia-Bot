@@ -21,7 +21,9 @@ describe('parseConsolePayload', () => {
     expect(parsed.workflows[0]?.correlationId).toBe('corr-workflow-console');
     expect(parsed.audits[0]?.occurred_at).toBe('2026-04-19T11:43:00Z');
     expect(parsed.audits[0]?.trace_id).toBe('trace-console-audit-plugin-disable');
+    expect(parsed.audits[0]?.session_id).toBe('session-operator-bearer-admin-user');
     expect(parsed.audits[0]?.error_code).toBe('plugin_disabled');
+    expect(parsed.audits[2]?.session_id).toBe('session-operator-bearer-job-operator');
     expect(parsed.recovery.totalSchedules).toBe(1);
   });
 

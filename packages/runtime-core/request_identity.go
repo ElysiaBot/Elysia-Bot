@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	pluginsdk "github.com/ohmyopencode/bot-platform/packages/plugin-sdk"
 )
 
 const RequestIdentityAuthMethodBearer = "bearer"
+
+const OperatorAuthSessionPluginID = "operator-auth"
 
 type RequestIdentityContext struct {
 	ActorID    string `json:"actor_id"`
@@ -134,4 +138,40 @@ func (c RequestIdentityContext) normalized() RequestIdentityContext {
 	c.AuthMethod = strings.ToLower(strings.TrimSpace(c.AuthMethod))
 	c.SessionID = strings.TrimSpace(c.SessionID)
 	return c
+}
+
+func BindRequestIdentitySession(ctx context.Context, store SessionStateStore) error {
+	if store == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	identity := RequestIdentityContextFromContext(ctx)
+	if identity.AuthMethod != RequestIdentityAuthMethodBearer || identity.SessionID == "" {
+		return nil
+	}
+	state := map[string]any{
+		"actor_id":    identity.ActorID,
+		"token_id":    identity.TokenID,
+		"auth_method": identity.AuthMethod,
+	}
+	return store.SaveSession(ctx, SessionState{
+		SessionID: identity.SessionID,
+		PluginID:  OperatorAuthSessionPluginID,
+		State:     state,
+	})
+}
+
+func ApplyAuditRequestIdentity(entry *pluginsdk.AuditEntry, ctx context.Context) {
+	if entry == nil {
+		return
+	}
+	identity := RequestIdentityContextFromContext(ctx)
+	if strings.TrimSpace(entry.Actor) == "" {
+		entry.Actor = identity.ActorID
+	}
+	if strings.TrimSpace(entry.SessionID) == "" {
+		entry.SessionID = identity.SessionID
+	}
 }

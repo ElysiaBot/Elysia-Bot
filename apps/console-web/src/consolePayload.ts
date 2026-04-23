@@ -259,6 +259,7 @@ function hasAuditShape(value: unknown): boolean {
     (value.event_id === undefined || isString(value.event_id)) &&
     (value.plugin_id === undefined || isString(value.plugin_id)) &&
     (value.run_id === undefined || isString(value.run_id)) &&
+    (value.session_id === undefined || isString(value.session_id)) &&
     (value.correlation_id === undefined || isString(value.correlation_id)) &&
     (value.error_category === undefined || isString(value.error_category)) &&
     (value.error_code === undefined || isString(value.error_code)) &&
