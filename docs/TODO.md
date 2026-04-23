@@ -11,21 +11,14 @@
 
 ## Active
 
-### 1. 把 Postgres 提升为正式生产路径
-- 把现有 store / schema / smoke path 扩成正式 storage contract 与 migration 路径。
-- 覆盖 restore / replay / job / schedule / workflow / audit / plugin state 的 Postgres 存储语义，而不是只做最小 smoke。
-- 保留 SQLite 作为开发与本地 profile 路径，不再让它承担默认生产假设。
-- 补齐迁移、备份、恢复演练与兼容性验证，确保状态恢复链路真实可用。
-- 验收：在 Postgres 下跑通 e2e、replay、workflow restore、operator write path，不再依赖 smoke-only 验证。
-
-### 2. 把认证与 operator identity 收口成真实身份链路
+### 1. 把认证与 operator identity 收口成真实身份链路
 - 控制台与所有写路径不再依赖裸 `X-Bot-Platform-Actor` 作为主身份输入。
 - 引入 token / JWT / SSO 中至少一种正式身份入口，并让 actor identity 与 session / audit 记录绑定。
 - 统一 RBAC deny、operator write record、审计事件格式，避免不同写入口各自留痕。
 - 在继续保持“读面优先”前提下，为 console / console API 建立最小 authn / authz 基线。
 - 验收：所有 operator 写路径都能追溯到真实身份，且有一致的鉴权与审计记录。
 
-### 3. 收口插件契约、兼容性校验与发布回退基础
+### 2. 收口插件契约、兼容性校验与发布回退基础
 - 为 manifest 建立版本化 schema 与 `runtimeVersionRange` 兼容矩阵，防止 host / runtime 演进时插件静默漂移。
 - 把 plugin template smoke 扩到 host mode / ABI / manifest drift / config schema drift 组合验证。
 - 为官方插件建立 inproc / subprocess 双模式兼容验证，但默认产品路径仍以 subprocess 为主。
