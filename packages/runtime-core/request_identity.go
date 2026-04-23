@@ -2,6 +2,7 @@ package runtimecore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,6 +12,8 @@ import (
 const RequestIdentityAuthMethodBearer = "bearer"
 
 const OperatorAuthSessionPluginID = "operator-auth"
+
+var ErrRequestUnauthorized = errors.New("unauthorized")
 
 type RequestIdentityContext struct {
 	ActorID    string `json:"actor_id"`
@@ -24,6 +27,21 @@ type OperatorBearerIdentityResolver struct {
 }
 
 type requestIdentityContextKey struct{}
+
+func OperatorAuthConfigured(cfg *OperatorAuthConfig) bool {
+	return cfg != nil && len(cfg.Tokens) > 0
+}
+
+func RequestActorID(ctx context.Context, operatorAuthConfigured bool, legacyActor string) (string, error) {
+	if operatorAuthConfigured {
+		identity := RequestIdentityContextFromContext(ctx)
+		if identity.AuthMethod != RequestIdentityAuthMethodBearer || strings.TrimSpace(identity.ActorID) == "" {
+			return "", ErrRequestUnauthorized
+		}
+		return identity.ActorID, nil
+	}
+	return strings.TrimSpace(legacyActor), nil
+}
 
 func WithRequestIdentityContext(ctx context.Context, identity RequestIdentityContext) context.Context {
 	identity = identity.normalized()

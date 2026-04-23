@@ -3,6 +3,7 @@ package runtimecore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -2206,8 +2207,12 @@ func (c *ConsoleAPI) recordConsoleReadDenied(r *http.Request, err error) {
 		return
 	}
 	permission := c.currentConsoleReadPermission()
+	actor := strings.TrimSpace(RequestIdentityContextFromContext(r.Context()).ActorID)
+	if actor == "" {
+		actor = strings.TrimSpace(r.Header.Get(ConsoleReadActorHeader))
+	}
 	entry := pluginsdk.AuditEntry{
-		Actor:         strings.TrimSpace(r.Header.Get(ConsoleReadActorHeader)),
+		Actor:         actor,
 		Permission:    permission,
 		Action:        "console.read",
 		Target:        consoleReadTarget,
@@ -2221,6 +2226,44 @@ func (c *ConsoleAPI) recordConsoleReadDenied(r *http.Request, err error) {
 	_ = recorder.RecordAudit(entry)
 }
 
+type requestIdentityConsoleReadAuthorizer struct {
+	provider               CurrentAuthorizerProvider
+	operatorAuthConfigured bool
+}
+
+func NewRequestIdentityConsoleReadAuthorizer(provider CurrentAuthorizerProvider, operatorAuthConfigured bool) ConsoleReadRequestAuthorizer {
+	if isNilCurrentAuthorizerProvider(provider) {
+		return nil
+	}
+	return requestIdentityConsoleReadAuthorizer{provider: provider, operatorAuthConfigured: operatorAuthConfigured}
+}
+
+func (a requestIdentityConsoleReadAuthorizer) AuthorizeConsoleRead(ctx context.Context, request *http.Request) error {
+	if isNilCurrentAuthorizerProvider(a.provider) {
+		return nil
+	}
+	snapshot := a.provider.CurrentSnapshot()
+	if snapshot == nil || snapshot.Authorizer == nil {
+		return errors.New("permission denied")
+	}
+	permission := strings.TrimSpace(snapshot.ConsoleReadPermission)
+	if permission == "" {
+		return nil
+	}
+	actor, err := RequestActorID(ctx, a.operatorAuthConfigured, request.Header.Get(ConsoleReadActorHeader))
+	if err != nil {
+		return err
+	}
+	decision := snapshot.Authorizer.Authorize(actor, permission, consoleReadTarget)
+	if decision.Allowed {
+		return nil
+	}
+	if decision.Reason == "" {
+		return errors.New("permission denied")
+	}
+	return errors.New(decision.Reason)
+}
+
 func (c *ConsoleAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2228,6 +2271,10 @@ func (c *ConsoleAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.readAuthorizer != nil {
 		if err := c.readAuthorizer.AuthorizeConsoleRead(r.Context(), r); err != nil {
+			if errors.Is(err, ErrRequestUnauthorized) {
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
 			c.recordConsoleReadDenied(r, err)
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return

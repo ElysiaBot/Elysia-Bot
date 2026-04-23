@@ -1171,6 +1171,41 @@ func TestConsoleAPIDeniedAuditCopiesRequestIdentitySessionID(t *testing.T) {
 	}
 }
 
+func TestConsoleAPIReturnsUnauthorizedWhenRequestIdentityAuthorizerRequiresBearerAuth(t *testing.T) {
+	t.Parallel()
+
+	audits := NewInMemoryAuditLog()
+	api := NewConsoleAPI(nil, nil, Config{RBAC: &RBACConfig{
+		ConsoleReadPermission: "console:read",
+		ActorRoles:            map[string][]string{"admin-user": {"admin"}},
+		Policies: map[string]pluginsdk.AuthorizationPolicy{
+			"admin": {
+				Permissions: []string{"console:read"},
+				PluginScope: []string{"*"},
+			},
+		},
+	}}, []string{"runtime started"}, audits)
+	provider := NewCurrentRBACAuthorizerProviderFromConfig(api.config.RBAC)
+	api.SetCurrentAuthorizerProvider(provider)
+	api.SetReadAuthorizer(NewRequestIdentityConsoleReadAuthorizer(provider, true))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/console", nil)
+	request.Header.Set(ConsoleReadActorHeader, "admin-user")
+	recorder := httptest.NewRecorder()
+
+	api.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "unauthorized") {
+		t.Fatalf("expected unauthorized response body, got %s", recorder.Body.String())
+	}
+	if len(audits.AuditEntries()) != 0 {
+		t.Fatalf("expected unauthorized console read not to record deny audit, got %+v", audits.AuditEntries())
+	}
+}
+
 func TestConsoleAPIReturnsScopeDeniedAuditReasonWhenConsoleReadScopeRejects(t *testing.T) {
 	t.Parallel()
 
