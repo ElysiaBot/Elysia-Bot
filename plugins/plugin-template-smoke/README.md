@@ -4,6 +4,8 @@
 
 它现在配合 `packages/plugin-sdk/cmd/plugin-dev` 作为当前仓库内的最小脚手架 / manifest 生成 / 本地打包入口，而不是继续依赖手工复制后再手工维护 `manifest.json`。
 
+repo 级插件开发主路径、成熟度分类、验证口径与非目标，统一见 [`docs/topics/plugin-development-main-path.md`](../../docs/topics/plugin-development-main-path.md)。这份 README 只保留模板本身的复制、生成、打包与 smoke 细节。
+
 ## 最小复制入口
 
 当前不再推荐手工复制目录。优先走 repo-local 脚手架：

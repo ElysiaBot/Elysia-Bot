@@ -2,13 +2,14 @@
 
 `apps/console-web` 现在是一个 **读面优先的本地 operator console**，而不再只是单页只读预览。
 
-它仍然坚持当前仓库边界：
+repo 级 operator console / auth 成熟度边界统一见 [`../../docs/topics/operator-console-auth.md`](../../docs/topics/operator-console-auth.md)。这里主要保留 Console Web 自己的运行、验证与交互面说明。
+
+它仍然坚持当前仓库的本地 console 边界：
 
 - 读模型来自现有 `GET /api/console`
 - 写操作走现有 runtime `/demo/*` operator endpoints
 - 当前 repo 默认开发基线里，浏览器内的 operator identity 使用 **本地/dev bearer token**，通过 `Authorization: Bearer <token>` 传递
-- bearer token 是当前正式 operator entry path，只负责把请求绑定到 repo config 里已声明的 actor identity
-- 当前 actor ID、roles、permissions、plugin scope 仍从 runtime persisted snapshot state 解析，不引入 JWT 解析、SSO 或完整 login / session 系统
+- 当前 actor ID、roles、permissions、plugin scope 仍从 runtime persisted snapshot state 解析，浏览器不自己解释 token claims
 
 ## 当前能力
 
@@ -82,4 +83,4 @@ npm run build --workspace @bot-platform/console-web
 - plugin config editor 故意只收窄到 `plugin-echo` 当前已存在的 persisted config 合同
 - 所有写操作都走 read-after-write refetch，不做 optimistic authority 假象
 - 不扩展成新的 control-plane API，也不重构 runtime 为前端服务
-- 不在这一层伪装成 JWT、SSO、login UI、登录流程或完整 session 管理产品
+- 更完整的 repo 级 operator console / auth 边界见 [`../../docs/topics/operator-console-auth.md`](../../docs/topics/operator-console-auth.md)
