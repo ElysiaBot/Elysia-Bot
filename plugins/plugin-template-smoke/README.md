@@ -75,13 +75,12 @@ npm run test:plugin-template:smoke
 npm run plugin:smoke -- -plugin ./plugins/plugin-echo
 ```
 
-这条命令覆盖：
+这条命令固定会走同一条 `plugin:smoke` 链路，也就是顺序执行 `manifest check -> package -> go test`。对 `plugin-echo` 来说，它当前证明的是：
 
 - `Manifest()` 生成的 `manifest.json` 是否仍与仓库内已提交产物一致
-- 事件型插件最小回复路径
-- 缺失 reply handle 的坏输入
-- reply service 错误冒泡
-- 当前第一个真实 repo-owned 非模板 smoke / reference path，说明同一条 `plugin:smoke` 命令也已用于 `plugin-echo` 这类真实插件
+- `plugin:package` 能否产出当前 repo-local 轻量打包结果
+- `plugins/plugin-echo` 目录内测试覆盖的 plugin-local 行为，包括最小回复路径、缺失 reply handle 的坏输入，以及 reply service 错误冒泡
+- 当前第一个真实 repo-owned 非模板 smoke / reference path，说明同一条 `plugin:smoke` 命令也已用于 `plugin-echo` 这类真实插件；runtime create / register / dispatch / reply 与 host 边界仍由 `plugin-template-smoke` 锚定
 
 ## 已知限制
 

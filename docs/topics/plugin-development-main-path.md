@@ -29,7 +29,7 @@
 ### Main path
 
 - repo-local `plugin:scaffold -> 改 Manifest()/逻辑 -> 必要时 plugin:manifest:write -> plugin:smoke`，是当前默认插件开发主路径。
-- `plugin-template-smoke`、`plugin-dev` 命令面、`npm run test:plugin-template:smoke`，以及通过 `npm run test:plugin:echo` 走同一条 smoke 命令的 `plugin-echo`，一起构成当前仓库对这条路径的默认支持。
+- `plugin-template-smoke`、`plugin-dev` 命令面、`npm run test:plugin-template:smoke`，以及通过 `npm run test:plugin:echo` 证明真实非模板插件也复用同一条 smoke 命令路径的 `plugin-echo`，一起构成当前仓库对这条路径的默认支持。
 
 ### Smoke / non-default
 
@@ -46,7 +46,7 @@
 ## 4. 当前验证口径
 
 - 本地开发时，最直接的命令链是：必要时先跑 `plugin:manifest:write`，再跑 `plugin:smoke`；后者会顺序执行 `manifest check`、`plugin:package` 与插件目录内的 `go test`。
-- 模板与主路径回归时，优先跑 `npm run test:plugin-template:smoke`。真实 repo-owned 非模板插件的第一条同路径验证，是 `npm run test:plugin:echo`。
+- 模板与主路径回归时，优先跑 `npm run test:plugin-template:smoke`。`npm run test:plugin:echo` 当前主要证明真实 repo-owned 非模板插件也复用同一条 `plugin:smoke` 命令路径；host 行为与 round-trip 语义仍由 `plugin-template-smoke` 锚定。
 - nightly evidence 也已经存在。`.github/workflows/nightly-validation.yml` 里的 `plugin-matrix` 每晚会跑 `plugin-echo`、`plugin-admin`、`plugin-ai-chat`、`plugin-scheduler`、`plugin-workflow-demo`、`plugin-template-smoke` 这些 repo-owned 插件验证命令。
 - 因此，当前插件开发主路径不是只有 README 文字说明，它已经有本地命令面和 nightly plugin-matrix 两层验证证据。
 
