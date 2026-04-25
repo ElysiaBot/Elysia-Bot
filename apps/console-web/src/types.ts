@@ -306,6 +306,11 @@ export type ConsoleMeta = {
   rbac_console_read_actor_header?: string;
   rbac_console_read_permission?: boolean;
   rbac_console_limitations?: string[];
+  rollout_record_read_model?: string;
+  rollout_record_persisted?: boolean;
+  rollout_head_read_model?: string;
+  rollout_head_persisted?: boolean;
+  rollout_console_limitations?: string[];
   verification_endpoints?: string[];
   request_identity?: {
     actor_id?: string;
