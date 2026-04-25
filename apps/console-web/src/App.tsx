@@ -17,6 +17,7 @@ import type {
   ConsolePayload,
   Job,
   PluginManifest,
+  RolloutOperation,
   Schedule,
 } from './types';
 
@@ -61,6 +62,8 @@ type DetailFieldProps = {
 };
 
 type StatusTone = 'default' | 'good' | 'danger' | 'warning' | 'muted';
+
+type RolloutSnapshot = ConsolePayload['rolloutHeads'][number]['stable'];
 
 function parseRoute(pathname: string): ConsoleRoute {
   const segments = pathname
@@ -156,6 +159,77 @@ function formatStringList(items: string[] | undefined): string {
     return '—';
   }
   return items.join(', ');
+}
+
+function formatMetaString(value: unknown, fallback = 'not declared'): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return fallback;
+  }
+  return value;
+}
+
+function formatMetaBoolean(value: unknown): string {
+  if (typeof value !== 'boolean') {
+    return 'not declared';
+  }
+  return value ? 'true' : 'false';
+}
+
+function formatMetaStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+}
+
+function formatRolloutSnapshot(snapshot?: RolloutSnapshot | null): string {
+  if (!snapshot) {
+    return 'not returned';
+  }
+  const parts = [snapshot.version ?? '', snapshot.apiVersion ? `api ${snapshot.apiVersion}` : '', snapshot.mode ?? ''].filter(
+    (part) => part.trim() !== '',
+  );
+  if (parts.length === 0) {
+    return 'not returned';
+  }
+  return parts.join(' · ');
+}
+
+function getStatusToneFromRolloutStatus(status?: string | null): StatusTone {
+  if (!status || status.trim() === '') {
+    return 'muted';
+  }
+  const normalized = status.toLowerCase();
+  if (
+    normalized.includes('failed') ||
+    normalized.includes('error') ||
+    normalized.includes('invalid') ||
+    normalized.includes('drift') ||
+    normalized.includes('denied')
+  ) {
+    return 'danger';
+  }
+  if (
+    normalized.includes('active') ||
+    normalized.includes('activated') ||
+    normalized.includes('succeeded') ||
+    normalized.includes('complete') ||
+    normalized.includes('stable')
+  ) {
+    return 'good';
+  }
+  if (normalized.includes('canary') || normalized.includes('prepare') || normalized.includes('rollback')) {
+    return 'warning';
+  }
+  return 'default';
+}
+
+function sortRolloutOperations(operations: RolloutOperation[]): RolloutOperation[] {
+  return [...operations].sort((left, right) => {
+    const leftTimestamp = left.updatedAt ?? left.occurredAt ?? '';
+    const rightTimestamp = right.updatedAt ?? right.occurredAt ?? '';
+    return rightTimestamp.localeCompare(leftTimestamp);
+  });
 }
 
 function formatResolvedIdentityField(value?: string | null): string {
@@ -818,6 +892,14 @@ function App() {
       const pluginWorkflows = payload.workflows.filter((workflow) => workflow.pluginId === plugin.id);
       const pluginLogs = relatedLogs(payload.logs, plugin.id, plugin.name, filters.logQuery);
       const currentPrefix = typeof plugin.config?.prefix === 'string' ? plugin.config.prefix : '';
+      const pluginRolloutHead = payload.rolloutHeads.find((candidate) => candidate.pluginId === plugin.id) ?? null;
+      const pluginRolloutOps = sortRolloutOperations(
+        payload.rolloutOps.filter((candidate) => candidate.pluginId === plugin.id),
+      ).slice(0, 5);
+      const rolloutHeadReadModel = formatMetaString(payload.meta.rollout_head_read_model);
+      const rolloutRecordReadModel = formatMetaString(payload.meta.rollout_record_read_model);
+      const rolloutConsoleLimitations = formatMetaStringList(payload.meta.rollout_console_limitations);
+      const pluginRolloutEmpty = pluginRolloutHead === null && pluginRolloutOps.length === 0;
 
       return (
         <>
@@ -917,6 +999,96 @@ function App() {
                 <DetailField label="Recovery failures before last success" value={plugin.lastRecoveryFailureCount ?? 0} />
               </div>
               <pre className="code-block">{JSON.stringify(plugin.config ?? {}, null, 2)}</pre>
+            </Panel>
+          </div>
+
+          <div className="page-grid two-column">
+            <Panel
+              title="Rollout state"
+              description="Read-only rollout visibility comes directly from the current /api/console snapshot. This route does not add rollout prepare, canary, activate, or rollback controls."
+            >
+              {pluginRolloutEmpty ? (
+                <EmptyState
+                  title="No rollout state for this plugin"
+                  description="The current console payload does not include a rollout head or rollout operation records for this plugin."
+                />
+              ) : pluginRolloutHead ? (
+                <>
+                  <div className="detail-grid">
+                    <DetailField label="Phase" value={<StatusPill label={pluginRolloutHead.phase} tone="default" />} />
+                    <DetailField
+                      label="Status"
+                      value={<StatusPill label={pluginRolloutHead.status} tone={getStatusToneFromRolloutStatus(pluginRolloutHead.status)} />}
+                    />
+                    <DetailField label="Stable version" value={formatRolloutSnapshot(pluginRolloutHead.stable)} />
+                    <DetailField label="Active version" value={formatRolloutSnapshot(pluginRolloutHead.active)} />
+                    <DetailField label="Candidate version" value={formatRolloutSnapshot(pluginRolloutHead.candidate)} />
+                    <DetailField label="Last operation ID" value={pluginRolloutHead.lastOperationId ?? '—'} />
+                    <DetailField label="Updated at" value={formatTimestamp(pluginRolloutHead.updatedAt)} />
+                    <DetailField label="State source" value={pluginRolloutHead.stateSource ?? rolloutHeadReadModel} />
+                    <DetailField label="Persisted" value={pluginRolloutHead.persisted ? 'true' : 'false'} />
+                  </div>
+                  <p className="muted-copy">{pluginRolloutHead.summary ?? 'No rollout head summary available.'}</p>
+                </>
+              ) : (
+                <EmptyState
+                  title="No rollout head in view"
+                  description="This plugin has rollout operation evidence in the current snapshot, but no current rollout head row was returned."
+                />
+              )}
+            </Panel>
+
+            <Panel
+              title="Recent rollout evidence and limitations"
+              description="Operation rows and rollout console meta stay read-only so the plugin route can surface rollout provenance without becoming a new control-plane surface."
+            >
+              <div className="detail-grid">
+                <DetailField label="Head read model" value={rolloutHeadReadModel} />
+                <DetailField label="Head persisted" value={formatMetaBoolean(payload.meta.rollout_head_persisted)} />
+                <DetailField label="Operation read model" value={rolloutRecordReadModel} />
+                <DetailField label="Operations persisted" value={formatMetaBoolean(payload.meta.rollout_record_persisted)} />
+              </div>
+
+              {rolloutConsoleLimitations.length === 0 ? (
+                <p className="muted-copy">No rollout limitation copy was returned in console meta.</p>
+              ) : (
+                <div className="stack-list compact-stack">
+                  {rolloutConsoleLimitations.map((limitation, index) => (
+                    <article key={`${plugin.id}-rollout-limitation-${index}`} className="list-card static-card">
+                      <strong>Rollout limitation {index + 1}</strong>
+                      <p>{limitation}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+
+              {pluginRolloutOps.length === 0 ? (
+                <EmptyState
+                  title="No recent rollout operations"
+                  description="The current console payload does not include rollout operation evidence for this plugin."
+                />
+              ) : (
+                <div className="stack-list">
+                  {pluginRolloutOps.map((operation) => (
+                    <article key={operation.operationId} className="list-card static-card">
+                      <div className="list-card-header">
+                        <strong>{operation.operationId}</strong>
+                        <div className="inline-badges">
+                          <StatusPill label={operation.action} tone="default" />
+                          <StatusPill label={operation.status} tone={getStatusToneFromRolloutStatus(operation.status)} />
+                        </div>
+                      </div>
+                      <p>{operation.summary ?? 'No rollout operation summary available.'}</p>
+                      <span className="list-meta">
+                        Current {operation.currentVersion ?? '—'} · Candidate {operation.candidateVersion ?? '—'}
+                      </span>
+                      <span className="list-meta">
+                        Occurred {formatTimestamp(operation.occurredAt)} · Updated {formatTimestamp(operation.updatedAt)} · {operation.stateSource ?? rolloutRecordReadModel} · persisted {operation.persisted ? 'true' : 'false'}
+                      </span>
+                    </article>
+                  ))}
+                </div>
+              )}
             </Panel>
           </div>
 

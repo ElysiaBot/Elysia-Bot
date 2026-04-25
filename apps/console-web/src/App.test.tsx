@@ -154,6 +154,52 @@ describe('App', () => {
     expect(finalRequest.searchParams.get('plugin_id')).toBe('plugin-echo');
   });
 
+  it('shows read-only rollout state, recent rollout evidence, and rollout provenance on the plugin detail route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(createFetchResponse(consolePayload));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Local operator console' });
+
+    fireEvent.click(screen.getByLabelText('Open plugin plugin-echo details'));
+    await screen.findByRole('heading', { name: 'Echo Plugin · plugin-echo' });
+
+    expect(screen.getByRole('heading', { name: 'Rollout state' })).toBeInTheDocument();
+    expect(screen.getByText('canary')).toBeInTheDocument();
+    expect(screen.getByText('canarying')).toBeInTheDocument();
+    expect(screen.getByText('0.1.0 · api v0 · subprocess')).toBeInTheDocument();
+    expect(screen.getAllByText('0.2.0-candidate · api v0 · subprocess')).toHaveLength(2);
+    expect(screen.getAllByText('rollout-console-1').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('sqlite-rollout-heads').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('sqlite-rollout-operation-records').length).toBeGreaterThan(0);
+    expect(screen.getByText('rollout policy declaration is read-only and mirrors existing runtime behavior only')).toBeInTheDocument();
+    expect(screen.getByText('rollout remains limited to manual /admin prepare|activate with minimal manifest preflight and activate-time drift re-check; no rollback or staged rollout')).toBeInTheDocument();
+    expect(screen.getByText(/rollout prepare prepared for plugin-echo/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /prepare rollout/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /activate rollout/i })).not.toBeInTheDocument();
+  });
+
+  it('shows an explicit empty rollout state for plugins without rollout data', async () => {
+    const payloadWithoutPluginAdminRollout = cloneMockConsoleData();
+    const fetchMock = vi.fn().mockResolvedValue(createFetchResponse(payloadWithoutPluginAdminRollout));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Local operator console' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Plugins' }));
+    fireEvent.click(screen.getByLabelText('Open plugin plugin-admin details'));
+    await screen.findByRole('heading', { name: 'Admin Plugin · plugin-admin' });
+
+    expect(screen.getByRole('heading', { name: 'Rollout state' })).toBeInTheDocument();
+    expect(screen.getByText('No rollout state for this plugin')).toBeInTheDocument();
+    expect(screen.getByText('The current console payload does not include a rollout head or rollout operation records for this plugin.')).toBeInTheDocument();
+    expect(screen.getByText('No recent rollout operations')).toBeInTheDocument();
+    expect(screen.getByText('The current console payload does not include rollout operation evidence for this plugin.')).toBeInTheDocument();
+    expect(screen.getAllByText('sqlite-rollout-heads').length).toBeGreaterThan(0);
+    expect(screen.getByText('sqlite-rollout-operation-records')).toBeInTheDocument();
+  });
+
   it('retries a dead-letter job from the routed detail page and refetches the console payload afterward', async () => {
     const retriedPayload = cloneMockConsoleData();
     const retriedJob = retriedPayload.jobs.find((job) => job.id === 'job-dead-letter-console');
