@@ -459,6 +459,14 @@ export const mockConsoleData: ConsolePayload = {
       'console read authorization uses bearer-backed request identity when operator_auth.tokens is configured; otherwise it falls back to the X-Bot-Platform-Actor header',
       'current slice persists and reloads a single runtime snapshot but does not add login/authn UX or a global resource hierarchy',
     ],
+    rollout_record_read_model: 'sqlite-rollout-operation-records',
+    rollout_record_persisted: true,
+    rollout_head_read_model: 'sqlite-rollout-heads',
+    rollout_head_persisted: true,
+    rollout_console_limitations: [
+      'rollout policy declaration is read-only and mirrors existing runtime behavior only',
+      'rollout remains limited to manual /admin prepare|activate with minimal manifest preflight and activate-time drift re-check; no rollback or staged rollout',
+    ],
     verification_endpoints: ['GET /api/console', 'GET /metrics', 'GET /demo/state/counts'],
   },
   recovery: {
