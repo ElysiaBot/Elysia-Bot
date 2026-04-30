@@ -14,7 +14,7 @@
 
 ## 2. 已验证，但不是更宽默认承诺的范围
 
-- runtime 当前已经提供一批最小 operator 写入口，用来证明控制面写路径成立，而不是把控制台包装成完整产品：plugin enable / disable、`plugin-echo` config update、schedule cancel、queued job pause / resume / cancel、dead-letter job retry。
+- runtime 当前已经提供一批最小 operator 写入口，用来证明控制面写路径成立，而不是把控制台包装成完整产品：plugin enable / disable、`plugin-echo` config update、delay schedule create / schedule cancel、queued job pause / resume / cancel、dead-letter job retry。
 - Console Web 当前直接消费现有 runtime `/demo/*` operator endpoints，而不是定义一套新的 control-plane API。浏览器 UI 已接入其中一部分最小写操作，但这仍然是有限写面。
 - 当前 bearer 基线来自 `deploy/config.dev.yaml` 里的 `operator_auth.tokens`。每个 token 通过 `token_ref` 绑定环境变量 secret，通过 `actor_id` 绑定已配置 actor。
 - `Authorization: Bearer <token>` 当前只负责把请求绑定到一个已配置 actor identity。roles、permissions、plugin scope 仍以 `rbac.actor_roles`、`rbac.policies` 与 runtime persisted snapshot state 为真值。

@@ -413,7 +413,7 @@ export const mockConsoleData: ConsolePayload = {
           pluginScope: ['*'],
         },
         'schedule-operator': {
-          permissions: ['schedule:cancel'],
+          permissions: ['schedule:create', 'schedule:cancel'],
           pluginScope: ['*'],
         },
       },
@@ -441,7 +441,7 @@ export const mockConsoleData: ConsolePayload = {
     sqlite_path: 'data/dev/runtime.sqlite',
     scheduler_interval_ms: 100,
     ai_job_dispatcher_registered: true,
-    console_mode: 'read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel',
+    console_mode: 'read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel',
     generated_at: '2026-04-19T12:00:00Z',
     plugin_operator_actions: ['/demo/plugins/{plugin-id}/enable', '/demo/plugins/{plugin-id}/disable'],
     plugin_operator_scope: 'already-registered plugins only',
@@ -454,8 +454,8 @@ export const mockConsoleData: ConsolePayload = {
       '/demo/jobs/{job-id}/retry',
     ],
     job_operator_scope: 'queued jobs for pause|resume|cancel, dead-letter jobs for retry',
-    schedule_operator_actions: ['/demo/schedules/{schedule-id}/cancel'],
-    schedule_operator_scope: 'currently-registered schedules only',
+    schedule_operator_actions: ['/demo/schedules/echo-delay', '/demo/schedules/{schedule-id}/cancel'],
+    schedule_operator_scope: 'delay schedule create via /demo/schedules/echo-delay; cancel for currently-registered schedules only',
     rbac_console_read_actor_header: 'X-Bot-Platform-Actor',
     rbac_console_read_permission: true,
     request_identity: {

@@ -610,6 +610,7 @@ func (s *runtimeAppReplayService) ReplayEvent(eventID string) (eventmodel.Event,
 }
 
 const (
+	scheduleCreatePermission = "schedule:create"
 	scheduleCancelPermission = "schedule:cancel"
 	jobRetryPermission       = "job:retry"
 	jobPausePermission       = "job:pause"
@@ -658,6 +659,8 @@ type operatorScheduleResponse struct {
 func operatorActionName(action, permission string) string {
 	permission = strings.TrimSpace(permission)
 	switch permission {
+	case scheduleCreatePermission:
+		return "schedule.create"
 	case "plugin:enable":
 		return "plugin.enable"
 	case "plugin:disable":
@@ -1406,7 +1409,7 @@ func newRuntimeAppWithOutputAndOptions(configPath string, output io.Writer, opti
 			"ai_job_dispatcher":       "runtime-job-queue",
 			"ai_chat_provider":        config.AIChat.Provider,
 			"runtime_worker_id":       runtimeWorkerID(),
-			"console_mode":            "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel",
+			"console_mode":            "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel",
 			"trace_exporter_enabled":  tracer.ExporterEnabled(),
 			"trace_exporter_kind":     settings.TraceExporter.Kind,
 		},
@@ -1687,8 +1690,8 @@ func (a *runtimeApp) handleConsole(w http.ResponseWriter, r *http.Request) {
 	meta["workflow_runtime_owner"] = "runtime-core"
 	meta["workflow_child_job_resume_path"] = "runtime-owned queued job terminal outcome -> workflow resume"
 	meta["workflow_reference_demo"] = "event trigger -> workflow wait -> child job -> suspend/restore -> compensation"
-	meta["schedule_operator_actions"] = []string{"/demo/schedules/{schedule-id}/cancel"}
-	meta["schedule_operator_scope"] = "currently-registered schedules only"
+	meta["schedule_operator_actions"] = []string{"/demo/schedules/echo-delay", "/demo/schedules/{schedule-id}/cancel"}
+	meta["schedule_operator_scope"] = "delay schedule create via /demo/schedules/echo-delay; cancel for currently-registered schedules only"
 	meta["schedule_recovery_source"] = "runtime-startup-restore"
 	meta["schedule_recovery_reason"] = "missing dueAt is recomputed and persisted during startup restore; invalid persisted plans are skipped"
 	meta["schedule_recovery_total_schedules"] = scheduleRecovery.TotalSchedules
@@ -2022,6 +2025,23 @@ func (a *runtimeApp) handleScheduleEchoDelay(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if err := bindOperatorRequestSession(r.Context(), a.controlState); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.reloadCurrentRBACAuthorizer(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	actor, err := a.requestActorID(r)
+	if err != nil {
+		if errors.Is(err, runtimecore.ErrRequestUnauthorized) {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var payload struct {
 		ID      string `json:"id"`
 		DelayMs int    `json:"delay_ms"`
@@ -2039,6 +2059,14 @@ func (a *runtimeApp) handleScheduleEchoDelay(w http.ResponseWriter, r *http.Requ
 	}
 	if strings.TrimSpace(payload.Message) == "" {
 		payload.Message = "scheduled hello"
+	}
+	permission := scheduleOperatorPermission("create")
+	operatorAction := operatorActionName("create", permission)
+	executionContext := eventmodel.ExecutionContext{CorrelationID: payload.ID, Metadata: map[string]any{"session_id": requestSessionID(r.Context())}}
+	if err := runtimecore.AuthorizeRBACActionWithProvider(a.authorizer, actor, permission, payload.ID); err != nil {
+		runtimecore.RecordAuthorizationDeniedAuditWithContext(a.auditRecorder, executionContext, actor, permission, payload.ID, err)
+		writeJSONResponse(w, http.StatusForbidden, operatorDeniedResult(operatorAction, payload.ID, err))
+		return
 	}
 	plan := runtimecore.SchedulePlan{
 		ID:        payload.ID,
@@ -2058,8 +2086,18 @@ func (a *runtimeApp) handleScheduleEchoDelay(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(plan)
+	recordOperatorSuccessAudit(a.auditRecorder, r.Context(), executionContext, actor, permission, operatorAction, plan.ID, "schedule_created")
+	if a.logger != nil {
+		_ = a.logger.Log("info", "runtime schedule created", runtimecore.LogContext{}, map[string]any{
+			"actor":       actor,
+			"action":      operatorAction,
+			"schedule_id": plan.ID,
+		})
+	}
+	writeJSONResponse(w, http.StatusOK, operatorScheduleResponse{
+		operatorActionResult: operatorSuccessResult(operatorAction, plan.ID, "schedule_created"),
+		ScheduleID:           plan.ID,
+	})
 }
 
 func (a *runtimeApp) handleScheduleOperator(w http.ResponseWriter, r *http.Request) {
@@ -2406,6 +2444,8 @@ func applyDemoAIJobContract(job *runtimecore.Job, prompt string, userID string) 
 
 func scheduleOperatorPermission(action string) string {
 	switch action {
+	case "create":
+		return scheduleCreatePermission
 	case "cancel":
 		return scheduleCancelPermission
 	default:

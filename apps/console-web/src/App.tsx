@@ -39,6 +39,7 @@ type ActionState =
   | { kind: 'idle' }
   | { kind: 'pending'; label: string }
   | { kind: 'success'; label: string; details: Record<string, unknown>; occurredAt: string }
+  | { kind: 'verification-mismatch'; label: string; details: Record<string, unknown>; message: string; occurredAt: string }
   | { kind: 'verification-error'; label: string; details: Record<string, unknown>; message: string; occurredAt: string }
   | { kind: 'error'; label: string; message: string; occurredAt: string };
 
@@ -82,6 +83,8 @@ type JobOperatorActionDescriptor = {
 };
 
 type RolloutSnapshot = ConsolePayload['rolloutHeads'][number]['stable'];
+
+const SCHEDULE_CREATE_PATH = '/demo/schedules/echo-delay';
 
 function parseRoute(pathname: string): ConsoleRoute {
   const segments = pathname
@@ -198,6 +201,23 @@ function formatMetaStringList(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+}
+
+function readResultString(value: Record<string, unknown> | undefined, keys: string[]): string | null {
+  if (!value) {
+    return null;
+  }
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim() !== '') {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+function resolveCreatedScheduleID(result: Record<string, unknown>, body?: Record<string, unknown>): string | null {
+  return readResultString(result, ['id', 'ID', 'schedule_id', 'scheduleId']) ?? readResultString(body, ['id']);
 }
 
 function formatRolloutSnapshot(snapshot?: RolloutSnapshot | null): string {
@@ -561,6 +581,9 @@ function App() {
   const [autoRefresh, setAutoRefresh] = useState(() => getStoredAutoRefresh());
   const [pluginEchoPrefixDraft, setPluginEchoPrefixDraft] = useState('');
   const [pluginEchoDirty, setPluginEchoDirty] = useState(false);
+  const [scheduleCreateIdDraft, setScheduleCreateIdDraft] = useState('');
+  const [scheduleCreateDelayMsDraft, setScheduleCreateDelayMsDraft] = useState('');
+  const [scheduleCreateMessageDraft, setScheduleCreateMessageDraft] = useState('');
   const [scheduleCancelVerification, setScheduleCancelVerification] = useState<ScheduleCancelVerificationState | null>(null);
   const hasLoadedOnce = useRef(false);
 
@@ -688,6 +711,7 @@ function App() {
     async (label: string, path: string, body?: Record<string, unknown>) => {
       setActionState({ kind: 'pending', label });
       const scheduleCancelTarget = /^\/demo\/schedules\/([^/]+)\/cancel$/u.exec(path)?.[1];
+      const scheduleCreateRequested = path === SCHEDULE_CREATE_PATH;
       if (scheduleCancelTarget) {
         setScheduleCancelVerification({
           scheduleId: decodeURIComponent(scheduleCancelTarget),
@@ -699,15 +723,38 @@ function App() {
         const result = await postOperatorAction(window.location.origin, currentBearerToken, path, body);
         try {
           const payload = await refreshConsole({ throwOnError: true });
+          if (payload === null) {
+            throw new Error('Console verification refetch returned no payload');
+          }
           if (scheduleCancelTarget) {
             const scheduleId = decodeURIComponent(scheduleCancelTarget);
-            const scheduleStillPresent = payload?.schedules.some((schedule) => schedule.id === scheduleId) ?? false;
+            const scheduleStillPresent = payload.schedules.some((schedule) => schedule.id === scheduleId);
             setScheduleCancelVerification({
               scheduleId,
               actionAccepted: true,
               verifiedMissingAfterRefetch: !scheduleStillPresent,
             });
           }
+
+          if (scheduleCreateRequested) {
+            const createdScheduleID = resolveCreatedScheduleID(result, body);
+            const verifiedSchedule = createdScheduleID ? payload.schedules.find((schedule) => schedule.id === createdScheduleID) ?? null : null;
+            if (!createdScheduleID || verifiedSchedule === null) {
+              setActionState({
+                kind: 'verification-mismatch',
+                label,
+                details: result,
+                message:
+                  createdScheduleID === null
+                    ? 'The runtime accepted the create request, but the response did not expose a schedule ID that Console Web could verify in the refetched /api/console snapshot.'
+                    : `The runtime accepted the create request, but the refetched /api/console snapshot did not include schedule ${createdScheduleID}.`,
+                occurredAt: new Date().toISOString(),
+              });
+              return;
+            }
+            navigate({ section: 'schedules', scheduleId: createdScheduleID });
+          }
+
           setActionState({
             kind: 'success',
             label,
@@ -745,7 +792,7 @@ function App() {
         });
       }
     },
-    [currentBearerToken, refreshConsole],
+    [currentBearerToken, navigate, refreshConsole],
   );
 
   const requestIdentity = data?.meta.request_identity;
@@ -796,6 +843,22 @@ function App() {
       return (
         <Panel title="Operator action failed" description={`${actionState.label} at ${formatTimestamp(actionState.occurredAt)}`} tone="error">
           <pre className="code-block">{actionState.message}</pre>
+        </Panel>
+      );
+    }
+    if (actionState.kind === 'verification-mismatch') {
+      return (
+        <Panel
+          title="Operator action accepted, but verification did not confirm the created schedule"
+          description={`${actionState.label} at ${formatTimestamp(actionState.occurredAt)}`}
+          tone="error"
+        >
+          <p className="muted-copy">
+            The runtime write endpoint returned success, but the follow-up <code>/api/console</code> snapshot did not surface the created
+            schedule, so this route is not claiming success from the POST alone.
+          </p>
+          <pre className="code-block">{actionState.message}</pre>
+          <pre className="code-block">{JSON.stringify(actionState.details, null, 2)}</pre>
         </Panel>
       );
     }
@@ -868,8 +931,9 @@ function App() {
                 <code>{formatStringList(payload.meta.job_operator_actions)}</code>
               </article>
               <article className="capability-card">
-                <strong>Schedule cancel</strong>
-                <p>Cancel currently-registered schedules through the existing runtime operator surface.</p>
+                <strong>Schedule control</strong>
+                <p>Register the narrow delay-schedule echo contract or cancel currently-registered schedules through the existing runtime operator surface.</p>
+                <p>Scope: {payload.meta.schedule_operator_scope ?? 'not declared'}</p>
                 <code>{formatStringList(payload.meta.schedule_operator_actions)}</code>
               </article>
             </div>
@@ -1574,9 +1638,11 @@ function App() {
   }
 
   function renderSchedules(payload: ConsolePayload) {
+    const scheduleCreateSupported = supportsOperatorAction(payload.meta.schedule_operator_actions, SCHEDULE_CREATE_PATH);
     const scheduleOperatorScope = formatMetaString(payload.meta.schedule_operator_scope);
     const scheduleOperatorActions = formatStringList(payload.meta.schedule_operator_actions);
     const scheduleCancelSupported = supportsOperatorAction(payload.meta.schedule_operator_actions, '/demo/schedules/{schedule-id}/cancel');
+    const scheduleCreateLikelyActors = actorsLikelyAllowed(payload.config, 'schedule:create', scheduleCreateIdDraft.trim() || 'schedule-draft');
 
     if (route.section === 'schedules' && route.scheduleId) {
       const schedule = payload.schedules.find((candidate) => candidate.id === route.scheduleId) ?? null;
@@ -1617,7 +1683,7 @@ function App() {
         <>
           <Panel
             title={`${schedule.id} · ${schedule.eventType}`}
-            description="Schedule detail routes now keep due source, persisted readiness, claim context, and recovery provenance visible alongside the existing cancel write path."
+            description="Schedule detail routes now keep due source, persisted readiness, claim context, and recovery provenance visible alongside the limited create/cancel write slice."
             actions={
               <RouteLink to={{ section: 'schedules' }} navigate={navigate} className="secondary-link" ariaLabel="Back to schedules">
                 Back to schedules
@@ -1746,7 +1812,76 @@ function App() {
     }
 
     return (
-      <Panel title="Schedules" description="Persisted schedule state, due evidence, and cancel surfaces stay together here before routing into a single schedule detail page.">
+      <Panel
+        title="Schedules"
+        description="Persisted schedule state stays readable here, and the list route now exposes the current limited delay-schedule create path before routing into schedule detail and cancel surfaces."
+      >
+        {scheduleCreateSupported ? (
+          <div className="action-group">
+            <form
+              className="action-card"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const parsedDelayMs = Number.parseInt(scheduleCreateDelayMsDraft.trim(), 10);
+                void runAction('Create delay schedule', SCHEDULE_CREATE_PATH, {
+                  id: scheduleCreateIdDraft.trim(),
+                  delay_ms: Number.isFinite(parsedDelayMs) ? parsedDelayMs : 0,
+                  message: scheduleCreateMessageDraft.trim(),
+                });
+              }}
+            >
+              <div className="action-copy">
+                <strong>Create delay schedule</strong>
+                <p>Register a delay schedule through the runtime's limited schedule operator surface, then refetch /api/console and only route into detail if that read model really returns the new schedule.</p>
+                <span className="list-meta">Runtime scope: {scheduleOperatorScope}</span>
+                <span className="list-meta">Runtime routes: {scheduleOperatorActions}</span>
+                <span className="list-meta">Likely RBAC actors: {formatStringList(scheduleCreateLikelyActors)}</span>
+                <span className="list-meta">Capability evidence: {SCHEDULE_CREATE_PATH} is advertised in meta.schedule_operator_actions.</span>
+                <span className="list-meta">Bearer auth still uses the current browser token when this POST is sent.</span>
+              </div>
+              <label className="field-label" htmlFor="schedule-create-id">
+                Schedule ID
+              </label>
+              <input
+                id="schedule-create-id"
+                className="text-input"
+                value={scheduleCreateIdDraft}
+                onChange={(event) => setScheduleCreateIdDraft(event.target.value)}
+                placeholder="schedule-demo-1"
+                disabled={actionBusy}
+                spellCheck={false}
+              />
+              <label className="field-label" htmlFor="schedule-create-delay-ms">
+                Delay ms
+              </label>
+              <input
+                id="schedule-create-delay-ms"
+                className="text-input"
+                type="number"
+                inputMode="numeric"
+                value={scheduleCreateDelayMsDraft}
+                onChange={(event) => setScheduleCreateDelayMsDraft(event.target.value)}
+                placeholder="100"
+                disabled={actionBusy}
+              />
+              <label className="field-label" htmlFor="schedule-create-message">
+                Message
+              </label>
+              <input
+                id="schedule-create-message"
+                className="text-input"
+                value={scheduleCreateMessageDraft}
+                onChange={(event) => setScheduleCreateMessageDraft(event.target.value)}
+                placeholder="scheduled hello"
+                disabled={actionBusy}
+              />
+              <button type="submit" className="primary-button" disabled={actionBusy}>
+                Create delay schedule
+              </button>
+            </form>
+          </div>
+        ) : null}
+
         {payload.schedules.length === 0 ? (
           <EmptyState title="No schedules in view" description="The runtime returned no persisted schedule rows in this snapshot." />
         ) : (

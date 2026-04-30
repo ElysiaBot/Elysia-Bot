@@ -80,7 +80,7 @@
   - `.github/workflows/nightly-validation.yml` 每晚跑 Postgres smoke 与 acceptance
   - 但 `README.md` 和 `deploy/config.dev.yaml` 都明确 SQLite 才是当前主存储
 - 有限 operator 写面
-  - 根 README 与 `apps/console-web/README.md` 都明确了 plugin enable / disable、`plugin-echo` config update、schedule cancel、job pause / resume / cancel / retry 这些最小写入口
+- 根 README 与 `apps/console-web/README.md` 都明确了 plugin enable / disable、`plugin-echo` config update、delay schedule create / schedule cancel、job pause / resume / cancel / retry 这些最小写入口
   - 这条线是已验证的，但用途是证明当前控制面写路径成立，不等于“完整控制台已经是默认主线”
 - `openai_compat` 的窄 real-provider 路径
   - `deploy/config.dev.yaml` 默认仍是 `ai_chat.provider: mock`

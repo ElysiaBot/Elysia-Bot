@@ -34,7 +34,7 @@ repo 级 operator console / auth 成熟度边界统一见 [`../../docs/topics/op
   - plugin-echo config update
   - queued job pause / resume / cancel
   - dead-letter job retry
-  - schedule cancel
+  - delay schedule create / schedule cancel
 - 更完整的读面证据：
   - alerts
   - audits

@@ -1430,7 +1430,7 @@ func writeScheduleCancelRBACConfigAt(t *testing.T, dir string, backend string, d
 	builder.WriteString("    viewer-user: [schedule-viewer]\n")
 	builder.WriteString("  policies:\n")
 	builder.WriteString("    schedule-operator:\n")
-	builder.WriteString("      permissions: [schedule:cancel]\n")
+	builder.WriteString("      permissions: [schedule:create, schedule:cancel]\n")
 	builder.WriteString("      plugin_scope: ['*']\n")
 	builder.WriteString("    schedule-viewer:\n")
 	builder.WriteString("      permissions: [schedule:view]\n")
@@ -1485,7 +1485,7 @@ func writeWriteActionRBACConfigWithBackendAt(t *testing.T, dir string, backend s
 	builder.WriteString("      permissions: [plugin:enable, plugin:disable]\n")
 	builder.WriteString("      plugin_scope: ['*']\n")
 	builder.WriteString("    schedule-operator:\n")
-	builder.WriteString("      permissions: [schedule:cancel]\n")
+	builder.WriteString("      permissions: [schedule:create, schedule:cancel]\n")
 	builder.WriteString("      plugin_scope: ['*']\n")
 	builder.WriteString("    job-operator:\n")
 	builder.WriteString("      permissions: [job:pause, job:resume, job:cancel, job:retry]\n")
@@ -1589,7 +1589,7 @@ func writeWriteActionRBACOperatorAuthConfig(t *testing.T, dir string) string {
 		"      permissions: [console:read, plugin:enable, plugin:disable]\n" +
 		"      plugin_scope: ['*']\n" +
 		"    schedule-operator:\n" +
-		"      permissions: [schedule:cancel]\n" +
+		"      permissions: [schedule:create, schedule:cancel]\n" +
 		"      plugin_scope: ['*']\n" +
 		"    job-operator:\n" +
 		"      permissions: [job:pause, job:resume, job:cancel, job:retry]\n" +
@@ -2754,7 +2754,7 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), `"plugin_read_model": "runtime-registry+sqlite-plugin-status-snapshot"`) {
 		t.Fatalf("expected console payload to include plugin_read_model=runtime-registry+sqlite-plugin-status-snapshot, got %s", resp.Body.String())
 	}
-	for _, expected := range []string{`"plugin_config_state_read_model": "runtime-registry+sqlite-plugin-config"`, `"plugin_config_state_kind": "plugin-owned-persisted-input"`, `"plugin_config_state_persisted": true`, `"plugin_config_operator_actions": [`, `"plugin_config_operator_scope": "plugins with app-local persisted config bindings only"`, `"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"workflow_read_model": "sqlite-workflow-instances"`, `"workflow_status_source": "sqlite-workflow-instances"`, `"workflow_status_persisted": true`, `"workflow_runtime_owner": "runtime-core"`, `"workflow_child_job_resume_path": "runtime-owned queued job terminal outcome -\u003e workflow resume"`, `"workflow_reference_demo": "event trigger -\u003e workflow wait -\u003e child job -\u003e suspend/restore -\u003e compensation"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"/demo/plugins/{plugin-id}/config"`, `"/demo/jobs/{job-id}/pause"`, `"/demo/jobs/{job-id}/resume"`, `"/demo/jobs/{job-id}/cancel"`, `"/demo/jobs/{job-id}/retry"`, `"/demo/schedules/{schedule-id}/cancel"`, `"job_operator_scope": "queued jobs for pause|resume|cancel, dead-letter jobs for retry"`, `"console_mode": "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`, `"configStateKind": "plugin-owned-persisted-input"`, `"configPersisted": false`} {
+	for _, expected := range []string{`"plugin_config_state_read_model": "runtime-registry+sqlite-plugin-config"`, `"plugin_config_state_kind": "plugin-owned-persisted-input"`, `"plugin_config_state_persisted": true`, `"plugin_config_operator_actions": [`, `"plugin_config_operator_scope": "plugins with app-local persisted config bindings only"`, `"plugin_enabled_state_read_model": "runtime-registry+sqlite-plugin-enabled-overlay"`, `"plugin_enabled_state_persisted": true`, `"plugin_operator_scope": "already-registered plugins only"`, `"workflow_read_model": "sqlite-workflow-instances"`, `"workflow_status_source": "sqlite-workflow-instances"`, `"workflow_status_persisted": true`, `"workflow_runtime_owner": "runtime-core"`, `"workflow_child_job_resume_path": "runtime-owned queued job terminal outcome -\u003e workflow resume"`, `"workflow_reference_demo": "event trigger -\u003e workflow wait -\u003e child job -\u003e suspend/restore -\u003e compensation"`, `"/demo/plugins/{plugin-id}/enable"`, `"/demo/plugins/{plugin-id}/disable"`, `"/demo/plugins/{plugin-id}/config"`, `"/demo/jobs/{job-id}/pause"`, `"/demo/jobs/{job-id}/resume"`, `"/demo/jobs/{job-id}/cancel"`, `"/demo/jobs/{job-id}/retry"`, `"/demo/schedules/echo-delay"`, `"/demo/schedules/{schedule-id}/cancel"`, `"job_operator_scope": "queued jobs for pause|resume|cancel, dead-letter jobs for retry"`, `"console_mode": "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel"`, `"enabled": true`, `"enabledStateSource": "runtime-default-enabled"`, `"enabledStatePersisted": false`, `"configStateKind": "plugin-owned-persisted-input"`, `"configPersisted": false`} {
 		if !strings.Contains(resp.Body.String(), expected) {
 			t.Fatalf("expected console payload to include %s, got %s", expected, resp.Body.String())
 		}
@@ -2778,7 +2778,7 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 		"/demo/replies",
 		"/demo/state/counts",
 	}
-	if got := consoleMetaString(t, console.Meta, "console_mode"); got != "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel" {
+	if got := consoleMetaString(t, console.Meta, "console_mode"); got != "read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel" {
 		t.Fatalf("expected console_mode to advertise plugin-config capability, got %q", got)
 	}
 	if got := consoleMetaString(t, console.Meta, "plugin_config_operator_scope"); got != "plugins with app-local persisted config bindings only" {
@@ -2792,6 +2792,12 @@ func TestRuntimeAppConsoleReflectsRuntimeState(t *testing.T) {
 	}
 	if got := consoleMetaString(t, console.Meta, "job_operator_scope"); got != "queued jobs for pause|resume|cancel, dead-letter jobs for retry" {
 		t.Fatalf("expected job_operator_scope to describe retry capability, got %q", got)
+	}
+	if got := consoleMetaStringSlice(t, console.Meta, "schedule_operator_actions"); !reflect.DeepEqual(got, []string{"/demo/schedules/echo-delay", "/demo/schedules/{schedule-id}/cancel"}) {
+		t.Fatalf("expected exact schedule_operator_actions, got %+v", got)
+	}
+	if got := consoleMetaString(t, console.Meta, "schedule_operator_scope"); got != "delay schedule create via /demo/schedules/echo-delay; cancel for currently-registered schedules only" {
+		t.Fatalf("expected schedule_operator_scope to describe create+cancel capability, got %q", got)
 	}
 	if got := consoleMetaStringSlice(t, console.Meta, "demo_paths"); !reflect.DeepEqual(got, expectedDemoPaths) {
 		t.Fatalf("expected exact demo_paths, got %+v", got)
@@ -3841,10 +3847,20 @@ func TestRuntimeAppScheduleCancelHotReloadsPersistedRBACSnapshotWithoutRestart(t
 
 	createAllowedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-hot-reload-allowed","delay_ms":500,"message":"cancel allowed"}`))
 	createAllowedReq.Header.Set("Content-Type", "application/json")
+	createAllowedReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
 	createAllowedResp := httptest.NewRecorder()
 	app.ServeHTTP(createAllowedResp, createAllowedReq)
 	if createAllowedResp.Code != http.StatusOK {
 		t.Fatalf("expected allowed seed schedule create 200, got %d: %s", createAllowedResp.Code, createAllowedResp.Body.String())
+	}
+
+	createDeniedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-hot-reload-denied","delay_ms":500,"message":"cancel denied"}`))
+	createDeniedReq.Header.Set("Content-Type", "application/json")
+	createDeniedReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
+	createDeniedResp := httptest.NewRecorder()
+	app.ServeHTTP(createDeniedResp, createDeniedReq)
+	if createDeniedResp.Code != http.StatusOK {
+		t.Fatalf("expected denied seed schedule create 200, got %d: %s", createDeniedResp.Code, createDeniedResp.Body.String())
 	}
 
 	cancelAllowedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-hot-reload-allowed/cancel", nil)
@@ -3861,14 +3877,6 @@ func TestRuntimeAppScheduleCancelHotReloadsPersistedRBACSnapshotWithoutRestart(t
 			"schedule-viewer": {Permissions: []string{"schedule:view"}, PluginScope: []string{"*"}},
 		},
 	})
-
-	createDeniedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-hot-reload-denied","delay_ms":500,"message":"cancel denied"}`))
-	createDeniedReq.Header.Set("Content-Type", "application/json")
-	createDeniedResp := httptest.NewRecorder()
-	app.ServeHTTP(createDeniedResp, createDeniedReq)
-	if createDeniedResp.Code != http.StatusOK {
-		t.Fatalf("expected denied seed schedule create 200, got %d: %s", createDeniedResp.Code, createDeniedResp.Body.String())
-	}
 
 	cancelDeniedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/schedule-hot-reload-denied/cancel", nil)
 	cancelDeniedReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
@@ -4214,6 +4222,7 @@ func TestRuntimeAppPostgresSelectedOperatorWritePathsCoverPersistedOperatorSurfa
 
 	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-postgres-cancel","delay_ms":60000,"message":"cancel in postgres"}`))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
 	createResp := httptest.NewRecorder()
 	app.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusOK {
@@ -5780,6 +5789,7 @@ func TestRuntimeAppOperatorWriteRoutesRequireBearerAuthWhenOperatorAuthConfigure
 
 	createScheduleReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-operator-auth","delay_ms":500,"message":"cancel me"}`))
 	createScheduleReq.Header.Set("Content-Type", "application/json")
+	createScheduleReq.Header.Set("Authorization", "Bearer opaque-schedule-token")
 	createScheduleResp := httptest.NewRecorder()
 	app.ServeHTTP(createScheduleResp, createScheduleReq)
 	if createScheduleResp.Code != http.StatusOK {
@@ -5809,6 +5819,7 @@ func TestRuntimeAppOperatorWriteRoutesRequireBearerAuthWhenOperatorAuthConfigure
 		path string
 		body string
 	}{
+		{name: "schedule create", path: "/demo/schedules/echo-delay", body: `{"id":"schedule-operator-auth-denied-create","delay_ms":500,"message":"unauthorized create"}`},
 		{name: "plugin disable", path: "/demo/plugins/plugin-echo/disable"},
 		{name: "plugin config", path: "/demo/plugins/plugin-echo/config", body: `{"prefix":"unauthorized: "}`},
 		{name: "job pause", path: "/demo/jobs/" + job.ID + "/pause"},
@@ -5839,8 +5850,8 @@ func TestRuntimeAppOperatorWriteRoutesRequireBearerAuthWhenOperatorAuthConfigure
 	if err != nil {
 		t.Fatalf("sqlite counts after unauthorized operator writes: %v", err)
 	}
-	if counts["sessions"] != 0 {
-		t.Fatalf("expected unauthorized operator writes not to persist operator sessions, got %+v", counts)
+	if counts["sessions"] != 1 {
+		t.Fatalf("expected unauthorized operator writes not to add sessions beyond the authorized seed create, got %+v", counts)
 	}
 }
 
@@ -5858,6 +5869,7 @@ func TestRuntimeAppOperatorWriteRoutesReturnForbiddenForAuthenticatedRBACDenials
 
 	createScheduleReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-bearer-denied","delay_ms":500,"message":"cancel denied"}`))
 	createScheduleReq.Header.Set("Content-Type", "application/json")
+	createScheduleReq.Header.Set("Authorization", "Bearer opaque-schedule-token")
 	createScheduleResp := httptest.NewRecorder()
 	app.ServeHTTP(createScheduleResp, createScheduleReq)
 	if createScheduleResp.Code != http.StatusOK {
@@ -5889,6 +5901,23 @@ func TestRuntimeAppOperatorWriteRoutesReturnForbiddenForAuthenticatedRBACDenials
 		t.Fatalf("expected viewer bearer console read 200, got %d: %s", consoleResp.Code, consoleResp.Body.String())
 	}
 	baselineAudits := len(app.audits.AuditEntries())
+
+	createDeniedReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-bearer-denied-create","delay_ms":500,"message":"create denied"}`))
+	createDeniedReq.Header.Set("Content-Type", "application/json")
+	createDeniedReq.Header.Set("Authorization", "Bearer opaque-viewer-token")
+	createDeniedReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
+	createDeniedResp := httptest.NewRecorder()
+	app.ServeHTTP(createDeniedResp, createDeniedReq)
+	if createDeniedResp.Code != http.StatusForbidden {
+		t.Fatalf("expected bearer-authenticated create denial 403, got %d: %s", createDeniedResp.Code, createDeniedResp.Body.String())
+	}
+	var deniedCreatePayload operatorActionEnvelopePayload
+	if err := json.Unmarshal(createDeniedResp.Body.Bytes(), &deniedCreatePayload); err != nil {
+		t.Fatalf("decode bearer-authenticated create denial: %v", err)
+	}
+	if deniedCreatePayload.Status != "forbidden" || deniedCreatePayload.Action != "schedule.create" || deniedCreatePayload.Target != "schedule-bearer-denied-create" || deniedCreatePayload.Accepted || deniedCreatePayload.Reason != "permission_denied" || deniedCreatePayload.Error != "permission denied" {
+		t.Fatalf("expected normalized bearer-authenticated create denial, got %+v", deniedCreatePayload)
+	}
 
 	pluginReq := httptest.NewRequest(http.MethodPost, "/demo/plugins/plugin-echo/disable", nil)
 	pluginReq.Header.Set("Authorization", "Bearer opaque-viewer-token")
@@ -5935,6 +5964,7 @@ func TestRuntimeAppOperatorWriteRoutesReturnForbiddenForAuthenticatedRBACDenials
 	}
 
 	for name, resp := range map[string]*httptest.ResponseRecorder{
+		"schedule create": createDeniedResp,
 		"plugin disable":  pluginResp,
 		"plugin config":   configResp,
 		"job retry":       retryResp,
@@ -5947,13 +5977,16 @@ func TestRuntimeAppOperatorWriteRoutesReturnForbiddenForAuthenticatedRBACDenials
 
 	entries := app.audits.AuditEntries()
 	deniedEntries := entries[baselineAudits:]
-	if len(deniedEntries) != 4 {
-		t.Fatalf("expected four bearer-authenticated denied operator audits, got %+v", entries)
+	if len(deniedEntries) != 5 {
+		t.Fatalf("expected five bearer-authenticated denied operator audits, got %+v", entries)
 	}
 	for _, entry := range deniedEntries {
 		if entry.Actor != "viewer-user" || entry.SessionID != runtimecore.OperatorBearerSessionID("viewer-user") || entry.Allowed || entry.Reason != "permission_denied" || entry.ErrorCategory != "authorization" || entry.ErrorCode != "permission_denied" {
 			t.Fatalf("expected bearer-authenticated deny audit to use viewer request identity, got %+v", entry)
 		}
+	}
+	if _, err := app.state.LoadSchedulePlan(t.Context(), "schedule-bearer-denied-create"); err == nil {
+		t.Fatal("expected forbidden bearer create not to persist schedule")
 	}
 	if _, err := app.state.LoadPluginConfig(t.Context(), "plugin-echo"); err == nil {
 		t.Fatal("expected forbidden bearer config update not to persist plugin config")
@@ -5967,6 +6000,64 @@ func TestRuntimeAppOperatorWriteRoutesReturnForbiddenForAuthenticatedRBACDenials
 	}
 	if _, err := app.state.LoadSchedulePlan(t.Context(), "schedule-bearer-denied"); err != nil {
 		t.Fatalf("expected forbidden bearer cancel to preserve schedule, got %v", err)
+	}
+}
+
+func TestRuntimeAppScheduleCreateOperatorUsesBearerAuthAndRecordsAuditWhenOperatorAuthConfigured(t *testing.T) {
+	t.Setenv("BOT_PLATFORM_OPERATOR_TOKEN", "opaque-operator-token")
+	t.Setenv("BOT_PLATFORM_OPERATOR_CONFIG_TOKEN", "opaque-config-token")
+	t.Setenv("BOT_PLATFORM_OPERATOR_JOB_TOKEN", "opaque-job-token")
+	t.Setenv("BOT_PLATFORM_OPERATOR_SCHEDULE_TOKEN", "opaque-schedule-token")
+	t.Setenv("BOT_PLATFORM_OPERATOR_VIEWER_TOKEN", "opaque-viewer-token")
+	app, err := newRuntimeApp(writeWriteActionRBACOperatorAuthConfig(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("new runtime app: %v", err)
+	}
+	defer func() { _ = app.Close() }()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-bearer-create-success","delay_ms":500,"message":"created with bearer auth"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer opaque-schedule-token")
+	createReq.Header.Set(runtimecore.ConsoleReadActorHeader, "viewer-user")
+	createResp := httptest.NewRecorder()
+	app.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("expected bearer-authenticated schedule create 200, got %d: %s", createResp.Code, createResp.Body.String())
+	}
+	var createPayload operatorScheduleResponsePayload
+	if err := json.Unmarshal(createResp.Body.Bytes(), &createPayload); err != nil {
+		t.Fatalf("decode bearer-authenticated create response: %v", err)
+	}
+	if createPayload.Status != "ok" || createPayload.Action != "schedule.create" || createPayload.Target != "schedule-bearer-create-success" || !createPayload.Accepted || createPayload.Reason != "schedule_created" || createPayload.ScheduleID != "schedule-bearer-create-success" {
+		t.Fatalf("expected normalized bearer-authenticated create response, got %+v", createPayload)
+	}
+	storedSession, err := app.state.LoadSession(t.Context(), runtimecore.OperatorBearerSessionID("schedule-admin"))
+	if err != nil {
+		t.Fatalf("load persisted schedule operator session: %v", err)
+	}
+	if storedSession.SessionID != runtimecore.OperatorBearerSessionID("schedule-admin") || storedSession.PluginID != runtimecore.OperatorAuthSessionPluginID {
+		t.Fatalf("unexpected persisted schedule operator session %+v", storedSession)
+	}
+	if storedSession.State["actor_id"] != "schedule-admin" || storedSession.State["token_id"] != "schedule-main" || storedSession.State["auth_method"] != runtimecore.RequestIdentityAuthMethodBearer {
+		t.Fatalf("unexpected persisted schedule operator session state %+v", storedSession.State)
+	}
+	if _, err := app.state.LoadSchedulePlan(t.Context(), "schedule-bearer-create-success"); err != nil {
+		t.Fatalf("expected bearer-authenticated create to persist schedule, got %v", err)
+	}
+	entries := app.audits.AuditEntries()
+	if len(entries) == 0 {
+		t.Fatal("expected bearer-authenticated schedule create to record audit evidence")
+	}
+	lastEntry := entries[len(entries)-1]
+	if lastEntry.Actor != "schedule-admin" || lastEntry.SessionID != runtimecore.OperatorBearerSessionID("schedule-admin") || lastEntry.Permission != "schedule:create" || lastEntry.Action != "schedule.create" || lastEntry.Target != "schedule-bearer-create-success" || !lastEntry.Allowed || lastEntry.Reason != "schedule_created" || lastEntry.ErrorCategory != "operator" || lastEntry.ErrorCode != "schedule_created" {
+		t.Fatalf("expected bearer-authenticated create audit entry, got %+v", lastEntry)
+	}
+	counts, err := app.state.Counts(t.Context())
+	if err != nil {
+		t.Fatalf("sqlite counts after bearer-authenticated schedule create: %v", err)
+	}
+	if counts["sessions"] != 1 {
+		t.Fatalf("expected one persisted schedule operator session, got %+v", counts)
 	}
 }
 
@@ -6123,6 +6214,7 @@ func TestRuntimeAppCancelScheduleOperatorRemovesPersistedPlanFromConsoleAndRecor
 
 	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-cancel-1","delay_ms":500,"message":"cancel me"}`))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
 	createResp := httptest.NewRecorder()
 	app.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusOK {
@@ -6208,6 +6300,7 @@ func TestRuntimeAppCancelScheduleOperatorReturnsForbiddenAndRecordsDeniedAudit(t
 
 	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-cancel-denied","delay_ms":500,"message":"deny me"}`))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
 	createResp := httptest.NewRecorder()
 	app.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusOK {
@@ -6241,11 +6334,12 @@ func TestRuntimeAppCancelScheduleOperatorReturnsForbiddenAndRecordsDeniedAudit(t
 	}
 
 	entries := app.audits.AuditEntries()
-	if len(entries) != 1 {
-		t.Fatalf("expected one denied cancel audit entry, got %+v", entries)
+	if len(entries) != 2 {
+		t.Fatalf("expected create+denied cancel audit entries, got %+v", entries)
 	}
-	if entries[0].Actor != "viewer-user" || entries[0].Action != "schedule.cancel" || entries[0].Permission != "schedule:cancel" || entries[0].Target != "schedule-cancel-denied" || entries[0].Allowed || entries[0].Reason != "permission_denied" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
-		t.Fatalf("expected denied cancel audit entry, got %+v", entries[0])
+	lastEntry := entries[len(entries)-1]
+	if lastEntry.Actor != "viewer-user" || lastEntry.Action != "schedule.cancel" || lastEntry.Permission != "schedule:cancel" || lastEntry.Target != "schedule-cancel-denied" || lastEntry.Allowed || lastEntry.Reason != "permission_denied" || lastEntry.ErrorCategory != "authorization" || lastEntry.ErrorCode != "permission_denied" {
+		t.Fatalf("expected denied cancel audit entry, got %+v", lastEntry)
 	}
 	for _, line := range app.logs.Lines() {
 		if strings.Contains(line, "runtime schedule cancelled") && strings.Contains(line, "schedule-cancel-denied") {
@@ -6265,6 +6359,7 @@ func TestRuntimeAppCancelScheduleOperatorFailsClosedWithoutActorHeaderUnderConfi
 
 	createReq := httptest.NewRequest(http.MethodPost, "/demo/schedules/echo-delay", strings.NewReader(`{"id":"schedule-cancel-missing-actor","delay_ms":500,"message":"deny me"}`))
 	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set(runtimecore.ConsoleReadActorHeader, "schedule-admin")
 	createResp := httptest.NewRecorder()
 	app.ServeHTTP(createResp, createReq)
 	if createResp.Code != http.StatusOK {
@@ -6288,7 +6383,7 @@ func TestRuntimeAppCancelScheduleOperatorFailsClosedWithoutActorHeaderUnderConfi
 		t.Fatalf("expected headerless cancel response to mention permission denied, got %s", cancelResp.Body.String())
 	}
 	entries := app.audits.AuditEntries()
-	if len(entries) != 1 || entries[0].Actor != "" || entries[0].Action != "schedule.cancel" || entries[0].Permission != "schedule:cancel" || entries[0].Target != "schedule-cancel-missing-actor" || entries[0].Allowed || entries[0].Reason != "permission_denied" || entries[0].ErrorCategory != "authorization" || entries[0].ErrorCode != "permission_denied" {
+	if len(entries) != 2 || entries[len(entries)-1].Actor != "" || entries[len(entries)-1].Action != "schedule.cancel" || entries[len(entries)-1].Permission != "schedule:cancel" || entries[len(entries)-1].Target != "schedule-cancel-missing-actor" || entries[len(entries)-1].Allowed || entries[len(entries)-1].Reason != "permission_denied" || entries[len(entries)-1].ErrorCategory != "authorization" || entries[len(entries)-1].ErrorCode != "permission_denied" {
 		t.Fatalf("expected headerless cancel deny audit entry, got %+v", entries)
 	}
 }

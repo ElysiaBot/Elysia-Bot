@@ -10,7 +10,7 @@ describe('parseConsolePayload', () => {
     const pluginDisableAudit = parsed.audits.find((entry) => entry.target === 'plugin-echo' && entry.action === 'disable');
     const jobRetryAudit = parsed.audits.find((entry) => entry.target === 'job-dead-letter-console' && entry.action === 'retry');
 
-    expect(parsed.meta.console_mode).toBe('read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel');
+		expect(parsed.meta.console_mode).toBe('read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel');
     expect(parsed.meta.job_operator_actions).toEqual([
       '/demo/jobs/{job-id}/pause',
       '/demo/jobs/{job-id}/resume',
@@ -18,7 +18,8 @@ describe('parseConsolePayload', () => {
       '/demo/jobs/{job-id}/retry',
     ]);
     expect(parsed.meta.job_operator_scope).toBe('queued jobs for pause|resume|cancel, dead-letter jobs for retry');
-    expect(parsed.meta.schedule_operator_actions).toEqual(['/demo/schedules/{schedule-id}/cancel']);
+		expect(parsed.meta.schedule_operator_actions).toEqual(['/demo/schedules/echo-delay', '/demo/schedules/{schedule-id}/cancel']);
+		expect(parsed.meta.schedule_operator_scope).toBe('delay schedule create via /demo/schedules/echo-delay; cancel for currently-registered schedules only');
     expect(parsed.meta.rbac_console_read_actor_header).toBe('X-Bot-Platform-Actor');
     expect(parsed.plugins[0]?.config).toEqual({ prefix: 'persisted: ' });
     expect(parsed.alerts[0]?.objectId).toBe('job-dead-letter-console');

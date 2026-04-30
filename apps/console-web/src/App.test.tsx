@@ -68,7 +68,7 @@ describe('App', () => {
     expect(screen.getByText('session-operator-bearer-viewer-user')).toBeInTheDocument();
     expect(screen.getByText('viewer-main')).toBeInTheDocument();
     expect(screen.getByText('bearer')).toBeInTheDocument();
-    expect(screen.getByText('read+operator-plugin-enable-disable+plugin-config+job-control+schedule-cancel')).toBeInTheDocument();
+    expect(screen.getByText('read+operator-plugin-enable-disable+plugin-config+job-control+schedule-create-cancel')).toBeInTheDocument();
     expect(screen.getByText('Recovery and alert evidence')).toBeInTheDocument();
     expect(screen.getAllByText('job-dead-letter-console').length).toBeGreaterThan(0);
     expect(screen.getByText('workflow-user-1')).toBeInTheDocument();
@@ -649,6 +649,182 @@ describe('App', () => {
     expect(screen.getByText(/\/demo\/schedules\/\{schedule-id\}\/cancel/i)).toBeInTheDocument();
     expect(screen.getByText(/schedule-console recovered persisted dueAt and claimed by runtime-local:scheduler-loop/i)).toBeInTheDocument();
     expect(screen.getByText('No schedule audits')).toBeInTheDocument();
+  });
+
+  it('creates a delay schedule from the schedules route with bearer auth, refetches the console payload, and routes into verified schedule detail', async () => {
+    const createdPayload = cloneMockConsoleData();
+    createdPayload.status.schedules = 2;
+    createdPayload.schedules = [
+      {
+        id: 'schedule-create-verified',
+        kind: 'delay',
+        source: 'runtime-demo-scheduler',
+        eventType: 'message.received',
+        cronExpr: '',
+        delayMs: 250,
+        executeAt: null,
+        dueAt: '2026-04-19T12:04:10Z',
+        dueAtSource: 'persisted-state',
+        dueAtEvidence: 'persisted-schedule-due-at',
+        dueAtPersisted: true,
+        dueReady: false,
+        overdue: false,
+        claimOwner: '',
+        claimedAt: null,
+        claimed: false,
+        recoveryState: 'registered',
+        dueStateSummary: 'scheduled',
+        dueSummary: 'delay registered and awaiting due time',
+        scheduleSummary: 'message.received | delay schedule-create-verified registered from runtime demo path',
+        createdAt: '2026-04-19T12:04:00Z',
+        updatedAt: '2026-04-19T12:04:00Z',
+      },
+      ...createdPayload.schedules,
+    ];
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createFetchResponse(consolePayload))
+      .mockResolvedValueOnce(
+        createFetchResponse({
+          status: 'ok',
+          action: 'schedule.create',
+          target: 'schedule-create-verified',
+          accepted: true,
+          reason: 'schedule_created',
+          schedule_id: 'schedule-create-verified',
+        }),
+      )
+      .mockResolvedValueOnce(createFetchResponse(createdPayload));
+    globalThis.fetch = fetchMock as typeof fetch;
+    window.localStorage.setItem('bot-platform.console.operator-bearer-token', 'opaque-schedule-token');
+    window.history.replaceState({}, '', '/schedules');
+
+    render(<App />);
+    await screen.findByRole('button', { name: 'Create delay schedule' });
+
+    fireEvent.change(screen.getByLabelText('Schedule ID'), { target: { value: 'schedule-create-verified' } });
+    fireEvent.change(screen.getByLabelText('Delay ms'), { target: { value: '250' } });
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'scheduled from test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create delay schedule' }));
+
+    await screen.findByRole('heading', { name: 'schedule-create-verified · message.received' });
+    await screen.findByRole('heading', { name: 'Operator action accepted' });
+    expect(window.location.pathname).toBe('/schedules/schedule-create-verified');
+    expect(screen.getByText('message.received | delay schedule-create-verified registered from runtime demo path')).toBeInTheDocument();
+
+    const actionCall = findRequestByPath(fetchMock, '/demo/schedules/echo-delay');
+    expect(actionCall).toBeDefined();
+    if (!actionCall) {
+      throw new Error('missing schedule create action call');
+    }
+    const [actionURL, actionInit] = actionCall;
+    expect(actionURL.pathname).toBe('/demo/schedules/echo-delay');
+    expect(actionInit?.method).toBe('POST');
+    expect((actionInit?.headers as Headers).get('Authorization')).toBe('Bearer opaque-schedule-token');
+    expect(actionInit?.body).toBe(JSON.stringify({ id: 'schedule-create-verified', delay_ms: 250, message: 'scheduled from test' }));
+
+    const [initialURL, initialInit] = requestAt(fetchMock, 0);
+    expect(initialURL.pathname).toBe('/api/console');
+    expect((initialInit?.headers as Headers).get('Authorization')).toBe('Bearer opaque-schedule-token');
+
+    const [refetchURL, refetchInit] = requestAt(fetchMock, 2);
+    expect(refetchURL.pathname).toBe('/api/console');
+    expect((refetchInit?.headers as Headers).get('Authorization')).toBe('Bearer opaque-schedule-token');
+
+    const [detailRefetchURL, detailRefetchInit] = requestAt(fetchMock, 3);
+    expect(detailRefetchURL.pathname).toBe('/api/console');
+    expect((detailRefetchInit?.headers as Headers).get('Authorization')).toBe('Bearer opaque-schedule-token');
+    expect(requestPathnames(fetchMock)).toEqual(['/api/console', '/demo/schedules/echo-delay', '/api/console', '/api/console']);
+  });
+
+  it('shows schedule create verification mismatch when the POST succeeds but the refetched console snapshot does not include the created schedule', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createFetchResponse(consolePayload))
+      .mockResolvedValueOnce(
+        createFetchResponse({
+          status: 'ok',
+          action: 'schedule.create',
+          target: 'schedule-create-missing',
+          accepted: true,
+          reason: 'schedule_created',
+          schedule_id: 'schedule-create-missing',
+        }),
+      )
+      .mockResolvedValueOnce(createFetchResponse(consolePayload));
+    globalThis.fetch = fetchMock as typeof fetch;
+    window.localStorage.setItem('bot-platform.console.operator-bearer-token', 'opaque-schedule-token');
+    window.history.replaceState({}, '', '/schedules');
+
+    render(<App />);
+    await screen.findByRole('button', { name: 'Create delay schedule' });
+
+    fireEvent.change(screen.getByLabelText('Schedule ID'), { target: { value: 'schedule-create-missing' } });
+    fireEvent.change(screen.getByLabelText('Delay ms'), { target: { value: '300' } });
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'verify me' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create delay schedule' }));
+
+    await screen.findByRole('heading', { name: 'Operator action accepted, but verification did not confirm the created schedule' });
+    expect(screen.queryByText('Console API unavailable')).not.toBeInTheDocument();
+    expect(screen.getByText('The runtime accepted the create request, but the refetched /api/console snapshot did not include schedule schedule-create-missing.')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Operator action accepted' })).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe('/schedules');
+    expect(requestPathnames(fetchMock)).toEqual(['/api/console', '/demo/schedules/echo-delay', '/api/console']);
+  });
+
+  it('shows schedule create verification-refetch failure after the POST succeeds', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(createFetchResponse(consolePayload))
+      .mockResolvedValueOnce(
+        createFetchResponse({
+          status: 'ok',
+          action: 'schedule.create',
+          target: 'schedule-create-refetch-failed',
+          accepted: true,
+          reason: 'schedule_created',
+          schedule_id: 'schedule-create-refetch-failed',
+        }),
+      )
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        json: async () => ({ message: 'console refetch denied' }),
+        text: async () => 'console refetch denied',
+      });
+    globalThis.fetch = fetchMock as typeof fetch;
+    window.localStorage.setItem('bot-platform.console.operator-bearer-token', 'opaque-schedule-token');
+    window.history.replaceState({}, '', '/schedules');
+
+    render(<App />);
+    await screen.findByRole('button', { name: 'Create delay schedule' });
+
+    fireEvent.change(screen.getByLabelText('Schedule ID'), { target: { value: 'schedule-create-refetch-failed' } });
+    fireEvent.change(screen.getByLabelText('Delay ms'), { target: { value: '400' } });
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'refetch failed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create delay schedule' }));
+
+    await screen.findByRole('heading', { name: 'Operator action accepted, but verification refetch failed' });
+    expect(screen.getByText('Console API unavailable')).toBeInTheDocument();
+    expect(screen.getAllByText(/console refetch denied/i).length).toBeGreaterThan(0);
+    expect(window.location.pathname).toBe('/schedules');
+    expect(requestPathnames(fetchMock)).toEqual(['/api/console', '/demo/schedules/echo-delay', '/api/console']);
+  });
+
+  it('hides schedule create when the runtime does not declare it in schedule_operator_actions', async () => {
+    const payloadWithoutScheduleCreate = cloneMockConsoleData();
+    payloadWithoutScheduleCreate.meta.schedule_operator_actions = ['/demo/schedules/{schedule-id}/cancel'];
+
+    const fetchMock = vi.fn().mockResolvedValue(createFetchResponse(payloadWithoutScheduleCreate));
+    globalThis.fetch = fetchMock as typeof fetch;
+    window.history.replaceState({}, '', '/schedules');
+
+    render(<App />);
+
+    await screen.findByRole('heading', { name: 'Schedules' });
+    expect(screen.queryByRole('button', { name: 'Create delay schedule' })).not.toBeInTheDocument();
+    expect(screen.getByText('schedule-console')).toBeInTheDocument();
   });
 
   it('cancels a schedule from the routed detail page, refetches the console payload, and keeps the route in a verified absent state afterward', async () => {
